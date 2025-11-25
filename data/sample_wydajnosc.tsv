@@ -1,0 +1,13 @@
+Wydzial	Data	Pracownik	Produkt	Ilosc	Czas_pracy	Cel	Uwagi
+Montaz	20231115	Jan Kowalski	Produkt A	150	8.0	20	Norma wykonana
+Montaz	20231115	Anna Nowak	Produkt A	180	8.0	20	Przekroczenie normy
+Montaz	20231115	Piotr Wisniewski	Produkt B	120	8.0	18	Awaria maszyny - 1h
+Lakiernia	20231115	Maria Zielinska	Produkt C	95	7.5	15	Brak uwag
+Lakiernia	20231115	Tomasz Kaczmarek	Produkt C	110	8.0	15	Dobra wydajnosc
+Spawalnia	20231115	Robert Lewandowski	Produkt D	85	8.0	12	Szkolenie nowego pracownika
+Spawalnia	20231115	Kamil Glik	Produkt D	100	8.0	12	Norma wykonana
+Montaz	20231116	Jan Kowalski	Produkt A	165	8.0	20	Dobra wydajnosc
+Montaz	20231116	Anna Nowak	Produkt B	140	8.0	18	Zmiana produktu
+Lakiernia	20231116	Maria Zielinska	Produkt C	100	8.0	15	Norma wykonana
+CNC	20231116	Adam Malysz	Produkt E	45	8.0	6	Wysoka precyzja
+CNC	20231116	Justyna Kowalczyk	Produkt E	52	8.0	6	Rekord dzienny
