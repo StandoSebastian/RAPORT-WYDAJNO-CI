@@ -180,6 +180,11 @@ FORM load_tsv_data.
       CONTINUE.
     ENDIF.
 
+    " Pomiń puste linie
+    IF lv_line IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
     CLEAR: lt_fields, ls_data.
     SPLIT lv_line AT cl_abap_char_utilities=>horizontal_tab INTO TABLE lt_fields.
 
@@ -208,9 +213,11 @@ FORM load_tsv_data.
     READ TABLE lt_fields INTO lv_field INDEX 8.
     IF sy-subrc = 0. ls_data-uwagi = lv_field. ENDIF.
 
-    " Filtruj według wydziału jeśli podano
+    " Filtruj według wydziału jeśli podano (bez rozróżniania wielkości liter)
     IF p_wydzl IS NOT INITIAL.
-      IF ls_data-wydzial CS p_wydzl.
+      DATA(lv_wydzial_upper) = to_upper( ls_data-wydzial ).
+      DATA(lv_filter_upper) = to_upper( CONV string( p_wydzl ) ).
+      IF lv_wydzial_upper CS lv_filter_upper.
         APPEND ls_data TO gt_wydajnosc.
       ENDIF.
     ELSE.
@@ -397,8 +404,23 @@ FORM show_htm_preview.
   " Wygeneruj HTML
   PERFORM generate_html CHANGING lv_html.
 
-  " Zapisz do pliku tymczasowego
-  lv_file = 'C:\temp\raport_wydajnosci.htm'.
+  " Pobierz katalog tymczasowy i zapisz plik
+  DATA: lv_temp_dir TYPE string.
+
+  CALL METHOD cl_gui_frontend_services=>get_temp_directory
+    CHANGING
+      temp_dir             = lv_temp_dir
+    EXCEPTIONS
+      cntl_error           = 1
+      error_no_gui         = 2
+      not_supported_by_gui = 3
+      OTHERS               = 4.
+
+  IF sy-subrc = 0.
+    lv_file = lv_temp_dir && '\raport_wydajnosci.htm'.
+  ELSE.
+    lv_file = 'C:\temp\raport_wydajnosci.htm'.
+  ENDIF.
 
   SPLIT lv_html AT cl_abap_char_utilities=>cr_lf INTO TABLE lt_html.
 
@@ -589,14 +611,13 @@ FORM send_email USING iv_format TYPE string.
         i_subject = lv_subject ).
 
       " Dodaj załącznik
+      lv_att_name = 'raport_wydajnosci'.
       IF iv_format = 'HTM'.
         PERFORM generate_html CHANGING lv_html.
         PERFORM convert_string_to_solix USING lv_html CHANGING lt_attachment lv_size.
-        lv_att_name = 'raport_wydajnosci'.
         lv_att_type = 'HTM'.
       ELSE.
         PERFORM generate_xlsx CHANGING lt_attachment lv_size.
-        lv_att_name = 'raport_wydajnosci'.
         lv_att_type = 'XLS'.
       ENDIF.
 
