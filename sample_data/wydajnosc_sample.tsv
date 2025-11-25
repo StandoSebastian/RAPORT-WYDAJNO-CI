@@ -1,0 +1,11 @@
+Wydzial	Pracownik	Nr_pracownika	Data	Czas_pracy	Ilosc_sztuk	Norma	Uwagi
+PRODUKCJA_A	Jan Kowalski	P001	25.11.2024	8	850	800	Nadgodziny
+PRODUKCJA_A	Anna Nowak	P002	25.11.2024	8	780	800	
+PRODUKCJA_B	Piotr Wiśniewski	P003	25.11.2024	8	920	800	Wydajność powyżej normy
+PRODUKCJA_A	Maria Zielińska	P004	25.11.2024	7.5	650	800	Wcześniejsze wyjście
+PRODUKCJA_B	Tomasz Kowalczyk	P005	25.11.2024	8	800	800	Norma wykonana
+PRODUKCJA_A	Katarzyna Lewandowska	P006	25.11.2024	8	550	800	Szkolenie nowego pracownika
+PRODUKCJA_B	Michał Wójcik	P007	25.11.2024	8	1050	800	Rekordowa wydajność
+PRODUKCJA_A	Agnieszka Kamiński	P008	25.11.2024	8	790	800	
+PRODUKCJA_B	Robert Dąbrowski	P009	25.11.2024	6	480	800	Awaria maszyny
+PRODUKCJA_A	Ewa Szymańska	P010	25.11.2024	8	820	800	
