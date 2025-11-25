@@ -1,0 +1,3192 @@
+REPORT zst_excel_agg.
+
+TYPE-POOLS: icon.
+
+************************************************************************
+* Parametry
+************************************************************************
+CONSTANTS c_tab TYPE c VALUE cl_abap_char_utilities=>horizontal_tab.
+
+" --- Etykieta + pole w jednej linii (nazwa komentarza max 8 znaków)
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(60) pfilelbl FOR FIELD p_file.
+  PARAMETERS p_file TYPE string LOWER CASE.
+SELECTION-SCREEN END OF LINE.
+
+
+
+
+
+SELECTION-SCREEN COMMENT 1(60) g_flabel FOR FIELD p_file.
+
+PARAMETERS:
+  p_onlyok AS CHECKBOX DEFAULT 'X',
+  p_errlog AS CHECKBOX DEFAULT ' ',
+  p_fixhh  AS CHECKBOX DEFAULT ' '.
+
+
+
+
+
+" --- SZYBKI TEST MAILA (plain text)
+PARAMETERS: p_tmail  AS CHECKBOX DEFAULT ' ',
+            p_tsubj  TYPE so_obj_des DEFAULT 'Raport Wydajności',
+            p_tbody  TYPE string     DEFAULT 'Raport Wydajności'.
+
+" --- Wysyłka HTML w treści
+PARAMETERS: p_html  AS CHECKBOX DEFAULT ' ',
+            p_hsub  TYPE so_obj_des DEFAULT 'Raport Wydajności – HTML w treści',
+            p_hpre  TYPE string     DEFAULT 'Poniżej podgląd raportu.'.
+
+" --- Wysyłka XLSX w załączniku
+PARAMETERS: p_xls  AS CHECKBOX DEFAULT ' ',
+            p_xsub TYPE so_obj_des DEFAULT 'Raport Wydajności – XLSX',
+            p_xmsg TYPE string     DEFAULT 'W załączniku raport w formacie XLSX.',
+            p_xfn  TYPE so_obj_des DEFAULT 'ZST_EXCEL_AGG.xlsx'.
+
+PARAMETERS p_prev AS CHECKBOX DEFAULT ' '.  "Szybki podgląd HTML (bez maila)
+
+" --- Adres e-mail do wysyłki raportów
+PARAMETERS p_email TYPE ad_smtpadr DEFAULT 'wydajnosci.dzienne@dramers.com.pl'.
+
+
+
+" --- Stałe kolorów LVC
+CONSTANTS:
+  c_col_key      TYPE i VALUE 1,  " granat
+  c_col_heading  TYPE i VALUE 3,  " jasnoniebieski
+  c_col_positive TYPE i VALUE 5,  " zielony
+  c_col_negative TYPE i VALUE 6,  " czerwony
+  c_col_total    TYPE i VALUE 7.  " żółty
+
+************************************************************************
+* Typy
+************************************************************************
+TYPES: BEGIN OF ty_row,
+         col1        TYPE string,  col2        TYPE string,  col3        TYPE string,
+         col4        TYPE string,  col5        TYPE string,  col6        TYPE string,
+         col7        TYPE string,  col8        TYPE string,  col9        TYPE string,
+         col10       TYPE string,  col11       TYPE string,  col12       TYPE string,
+         col13       TYPE string,  col14       TYPE string,  col15       TYPE string,
+         col16       TYPE string,  col17       TYPE string,  col18       TYPE string,
+         col19       TYPE string,  col20       TYPE string,  col21       TYPE string,
+         col22       TYPE string,  col23       TYPE string,  col24       TYPE string,
+         col25       TYPE string,  col26       TYPE string,  col27       TYPE string,
+         col28       TYPE string,  col29       TYPE string,  col30       TYPE string,
+         col31       TYPE string,  col32       TYPE string,  col33       TYPE string,
+         col34       TYPE string,  col35       TYPE string,  col36       TYPE string,
+         col37       TYPE string,  col38       TYPE string,
+         wydzial        TYPE char15,
+         norma_linia   TYPE decfloat34,
+         aufnr_int      TYPE char12,
+         matnr          TYPE matnr,
+         maktx          TYPE maktx,
+         arbpl          TYPE crhd-arbpl,
+         ktxt           TYPE crtx-ktext,
+         bmsch_norma    TYPE decfloat34,
+         norma_val      TYPE decfloat34,
+         min_na_szt     TYPE decfloat34,
+         norma_txt      TYPE string,
+         czas_trw       TYPE i,
+         czas_przerwy   TYPE i,
+         czas_przejscia TYPE i,
+         czas_przezbr   TYPE i,
+         czas_awarie    TYPE i,
+         czas_orga      TYPE i,
+         czas_efektywny TYPE i,
+         plan_norma     TYPE decfloat34,
+         wydajnosc_proc TYPE decfloat34,
+         osoby_norma    TYPE afvc-anzma,
+         osoby_rzecz    TYPE afvc-anzma,
+         osoby_norm_corr TYPE decfloat34,
+         status         TYPE string,
+         valid          TYPE abap_bool,
+       END OF ty_row.
+TYPES ty_t_rows TYPE STANDARD TABLE OF ty_row WITH EMPTY KEY.
+
+
+
+
+
+INITIALIZATION.
+  sy-title  = 'RAPORT WYDAJNOŚCI'.
+  pfilelbl  = 'Podaj plik tsv z danymi:'.
+
+
+
+
+
+TYPES: BEGIN OF ty_agg,
+         data_d        TYPE string,
+         zmiana        TYPE string,
+         linia_plik    TYPE string,
+         linia_base    TYPE string,         " <-- NOWE POLE (linia bez " Σ")
+         linia_sort    TYPE int4,
+         nazwa_stan    TYPE string,
+         nr_zlecenia   TYPE string,  " <-- DODAJ TO POLE
+         matnr         TYPE matnr,
+         maktx         TYPE maktx,
+         wydzial       TYPE char15,
+         norma_linia   TYPE decfloat34,
+         qty_sum       TYPE decfloat34,
+         plan_sum      TYPE decfloat34,
+         plan_sum_int  TYPE int4,
+         rec_count     TYPE i,
+         wyd_wazona    TYPE decfloat34,
+         wyd_waz_disp  TYPE p DECIMALS 1,
+         osoby_sum     TYPE decfloat34,
+         osoby_avg     TYPE p DECIMALS 1,
+         osoby_norm_wsum TYPE decfloat34, " suma (osoby_norma * min_efektywne)
+         osoby_norm_avg  TYPE p DECIMALS 1, " średnia ważona normy osób
+         osoby_rzecz_wsum TYPE decfloat34, " suma (osoby_rzecz * czas_trw)
+         osoby_rzecz_avg TYPE p DECIMALS 1, " średnia ważona osób rzeczywistych
+         c_przej_sum   TYPE i,
+         c_przezbr_sum TYPE i,
+         c_przerwy_sum TYPE i,
+         c_pracy_sum   TYPE i,
+         c_awarie_sum   TYPE i,        " NOWE: suma minut awarii
+         awarie_txt_sum TYPE string,   " NOWE: sklejony opis awarii
+         total_lvl     TYPE i,            " 0=detal, 1=Σ(dzień), 2=Σ(zmiana)
+         sort_total    TYPE i,
+         is_total      TYPE abap_bool,
+         ctab          TYPE lvc_t_scol,
+         c_trwania_sum TYPE decfloat34,
+         c_org_sum     TYPE i,          " NOWE: suma czasu organizacyjnego (przejścia + przezbrojenia + przerwy)
+       END OF ty_agg.
+
+
+TYPES ty_t_agg TYPE STANDARD TABLE OF ty_agg WITH EMPTY KEY.
+
+
+
+" Wyrównanie kolumn SALV przekazywane do set_col ('L' / 'C' / 'R' lub pusty)
+TYPES ty_align TYPE c LENGTH 1.
+
+************************************************************************
+* Dane globalne / ALV
+************************************************************************
+DATA gt_rows TYPE ty_t_rows.
+DATA gt_err  TYPE ty_t_rows.
+DATA gt_agg  TYPE ty_t_agg.
+DATA gt_agg2 TYPE ty_t_agg.
+DATA go_grid TYPE REF TO cl_gui_alv_grid.
+DATA lv_full_title TYPE string.
+DATA lv_title      TYPE string.
+DATA lv_data_min   TYPE string.
+DATA ls_row TYPE ty_row.
+
+CLASS lcl_events DEFINITION DEFERRED.
+DATA go_ev TYPE REF TO lcl_events.
+
+
+
+
+
+************************************************************************
+* F4 – plik
+************************************************************************
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  PERFORM f4_file CHANGING p_file.
+
+FORM f4_file CHANGING c_file TYPE string.
+  DATA lt_filetab TYPE filetable.
+  DATA lv_rc      TYPE i.
+  cl_gui_frontend_services=>file_open_dialog(
+    EXPORTING file_filter = 'TSV (*.tsv)|*.tsv|All (*.*)|*.*'
+    CHANGING  file_table  = lt_filetab
+              rc          = lv_rc ).
+  IF lv_rc > 0.
+    READ TABLE lt_filetab INDEX 1 INTO DATA(ls_file).
+    IF sy-subrc = 0.
+      c_file = ls_file-filename.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* Budowa tytułu raportu na podstawie pliku (wydział)
+*---------------------------------------------------------------------*
+FORM build_title_from_file USING    iv_path  TYPE string
+                           CHANGING cv_title TYPE string.
+
+  DATA(base) = |RAPORT WYDAJNOŚCI|.
+  DATA(f)    = iv_path.
+  TRANSLATE f TO LOWER CASE.  " szukamy bez rozróżniania wielkości liter
+
+  IF      f CS 'aerozol'.        " pokryje: aerozol, aerozole
+    cv_title = base && ' AEROZOLE'.
+  ELSEIF f CS 'konfekc'.         " pokryje: konfekcja, konfekcja
+    cv_title = base && ' KONFEKCJA'.
+  ELSEIF f CS 'kostk'.           " pokryje: kostka, kostki
+    cv_title = base && ' KOSTKA'.
+  ELSEIF f CS 'wtryskownia'.
+    cv_title = base && ' WTRYSKOWNIA'.
+  ELSEIF f CS 'blacharn'.        " pokryje: blacharnia, blacharnie
+    cv_title = base && ' BLACHARNIA'.
+  ELSE.
+    cv_title = base.
+  ENDIF.
+
+ENDFORM.
+
+
+************************************************************************
+* Start
+************************************************************************
+START-OF-SELECTION.
+
+  " 1) Tryb testowy – prosty mail i koniec
+  IF p_tmail = abap_true.
+    PERFORM send_simple_test_mail USING p_tsubj p_tbody p_email.
+    RETURN.
+  ENDIF.
+
+  " 2) Pełny przebieg raportu
+  PERFORM read_tsv USING p_file CHANGING gt_rows.
+
+  DATA lv_bad TYPE i.
+  LOOP AT gt_rows INTO DATA(ls_cnt).
+    IF ls_cnt-valid <> abap_true.
+      ADD 1 TO lv_bad.
+    ENDIF.
+  ENDLOOP.
+  DATA(lv_all) = lines( gt_rows ).
+  DATA(lv_ok)  = lv_all - lv_bad.
+  MESSAGE |Poprawne: { lv_ok }  Błędne: { lv_bad }  Wszystkie: { lv_all }| TYPE 'S'.
+
+  IF p_errlog = abap_true AND lv_bad > 0.
+    CLEAR gt_err.
+    LOOP AT gt_rows INTO DATA(ls_bad) WHERE valid <> abap_true.
+      APPEND ls_bad TO gt_err.
+    ENDLOOP.
+    PERFORM show_alv_err USING gt_err.
+  ENDIF.
+
+  PERFORM build_agg     USING gt_rows CHANGING gt_agg.
+  PERFORM build_rollups USING gt_agg  CHANGING gt_agg2.
+
+PERFORM build_title_from_file USING p_file CHANGING lv_title.
+
+
+
+
+
+*READ TABLE gt_rows INTO ls_row INDEX 1.
+*IF sy-subrc = 0.
+*  MESSAGE |Pierwsza data: { ls_row-col2 }| TYPE 'S'.
+*ENDIF.
+
+CLEAR lv_data_min.
+LOOP AT gt_rows INTO ls_row.
+  IF lv_data_min = '' OR ls_row-col2 < lv_data_min.
+    lv_data_min = ls_row-col2.
+  ENDIF.
+ENDLOOP.
+
+lv_full_title = |{ lv_title } { lv_data_min }|.
+
+*MESSAGE |LV_FULL_TITLE: { lv_full_title }| TYPE 'S'.
+
+
+
+    " --- Podgląd HTML (bez maila), jeśli zaznaczono P_PREV
+IF p_prev = abap_true.
+  PERFORM preview_html USING lv_full_title p_hpre.
+  RETURN. " jeżeli chcesz tylko podgląd bez ALV/maili
+ENDIF.
+
+
+  " Kolorowanie komórek „Wydajność – ważona %” w detalu
+  LOOP AT gt_agg2 ASSIGNING FIELD-SYMBOL(<r>).
+    DATA desc TYPE string.
+
+
+    DATA lv_col TYPE i.
+    IF <r>-plan_sum = 0.
+      lv_col = cl_gui_resources=>list_col_background.
+    ELSE.
+      DATA lv_w TYPE decfloat34. lv_w = <r>-wyd_wazona.
+      IF lv_w < 85.
+        lv_col = cl_gui_resources=>list_col_negative.
+      ELSEIF lv_w < 95.
+        lv_col = cl_gui_resources=>list_col_total.
+      ELSE.
+        lv_col = cl_gui_resources=>list_col_positive.
+      ENDIF.
+    ENDIF.
+
+    DATA ls_c TYPE lvc_s_scol.
+    ls_c-fname     = 'WYD_WAZ_DISP'.
+    ls_c-color-col = lv_col.
+    ls_c-color-int = 1.
+    ls_c-color-inv = 0.
+    APPEND ls_c TO <r>-ctab.
+
+
+" Kolorowanie Czasu trwania (min)
+IF <r>-total_lvl = 0. " tylko detale, nie sumy!
+  DATA lv_col_cpracy TYPE i.
+  IF <r>-c_trwania_sum = 480.
+    lv_col_cpracy = cl_gui_resources=>list_col_positive. " jasnozielony
+  ELSE.
+    lv_col_cpracy = cl_gui_resources=>list_col_total.    " jasnożółty
+  ENDIF.
+  DATA ls_cpracy TYPE lvc_s_scol.
+  ls_cpracy-fname     = 'C_TRWANIA_SUM'.   " Taka sama nazwa jak w fieldcatalogu!
+  ls_cpracy-color-col = lv_col_cpracy.
+  ls_cpracy-color-int = 1.
+  ls_cpracy-color-inv = 0.
+  APPEND ls_cpracy TO <r>-ctab.
+ENDIF.
+  ENDLOOP.
+
+
+
+" 3) Wysyłka HTML (treść) – opcjonalnie
+IF p_html = abap_true.
+  DATA(lv_html) = ``.
+  PERFORM build_html_from_agg USING    gt_agg2
+                              CHANGING lv_html.
+  PERFORM send_html_simple    USING    p_hsub p_hpre lv_html p_email.
+ENDIF.
+
+
+  " 4) Wysyłka XLSX (załącznik) – opcjonalnie
+  IF p_xls = abap_true.
+    DATA: lx_xstr TYPE xstring,
+          lx_len  TYPE int4,
+          lt_bin  TYPE solix_tab,
+          lv_size TYPE so_obj_len.
+    PERFORM build_xlsx_from_tab USING    gt_agg2
+                               CHANGING lx_xstr lt_bin lx_len lv_size.
+    PERFORM send_xlsx_simple   USING    p_xsub p_xmsg p_xfn lt_bin p_email.
+  ENDIF.
+
+*  " === DEBUG: Sprawdź kolory Σ DNIA ===
+*  DATA ls_debug TYPE ty_agg.
+*  LOOP AT gt_agg2 INTO ls_debug WHERE is_total = abap_true AND total_lvl = 1.
+*    MESSAGE |Σ DNIA: { ls_debug-data_d }, kolory: { lines( ls_debug-ctab ) }| TYPE 'I'.
+*  ENDLOOP.
+*  " === KONIEC DEBUG ===
+
+
+
+
+  " 5) Wyświetlenie ALV jak dotąd
+  PERFORM show_grid USING gt_agg2.
+
+
+
+*  *--- 1. Nagłówek z wydziałem
+
+PERFORM build_title_from_file USING p_file CHANGING lv_title.
+
+
+
+lv_full_title = |{ lv_title } { lv_data_min }|.
+
+************************************************************************
+* Helpery
+************************************************************************
+FORM round3 USING    iv_val TYPE decfloat34
+            CHANGING cv_val TYPE decfloat34.
+  cv_val = round( val = iv_val dec = 1 ). " zaokrąglenie do 1 miejsca po przecinku
+ENDFORM.
+
+FORM fix_hhmm CHANGING cv_hhmm TYPE string.
+  IF cv_hhmm IS INITIAL. RETURN. ENDIF.
+  IF strlen( cv_hhmm ) = 5 AND cv_hhmm+2(1) = ':'.
+    REPLACE ALL OCCURRENCES OF ':' IN cv_hhmm WITH ''.
+  ENDIF.
+  IF strlen( cv_hhmm ) <> 4 OR NOT ( cv_hhmm CO '0123456789' ).
+    CLEAR cv_hhmm. RETURN.
+  ENDIF.
+  DATA h TYPE i. DATA m TYPE i.
+  h = cv_hhmm(2). m = cv_hhmm+2(2).
+  IF m >= 60. h = h + m DIV 60. m = m MOD 60. ENDIF.
+  IF h >= 24. h = h MOD 24. ENDIF.
+  cv_hhmm = |{ h WIDTH = 2 PAD = '0' }{ m WIDTH = 2 PAD = '0' }|.
+ENDFORM.
+
+FORM check_date USING iv_val TYPE string CHANGING cv_msg TYPE string.
+  CLEAR cv_msg.
+  IF iv_val IS INITIAL. cv_msg = 'Brak daty'. RETURN. ENDIF.
+  DATA lv TYPE string. lv = iv_val.
+  TRANSLATE lv USING '-./ '.
+  REPLACE ALL OCCURRENCES OF '-' IN lv WITH ''.
+  IF strlen( lv ) <> 8 OR NOT ( lv CO '0123456789' ).
+    cv_msg = |Nieprawidłowa data ({ iv_val })|.
+  ENDIF.
+ENDFORM.
+
+FORM check_hhmm USING iv_val TYPE string iv_name TYPE string CHANGING cv_msg TYPE string.
+  CLEAR cv_msg.
+  IF iv_val IS INITIAL. RETURN. ENDIF.
+  DATA lv TYPE string. lv = iv_val.
+  IF strlen( lv ) = 5 AND lv+2(1) = ':'.
+    REPLACE ALL OCCURRENCES OF ':' IN lv WITH ''.
+  ENDIF.
+  IF strlen( lv ) <> 4 OR NOT ( lv CO '0123456789' ).
+    cv_msg = |Nieprawidłowa godzina { iv_name } ({ iv_val })|.
+  ENDIF.
+ENDFORM.
+
+FORM parse_qty USING iv_text TYPE string CHANGING cv_qty TYPE decfloat34.
+  DATA lv TYPE string. lv = iv_text.
+  CLEAR cv_qty. IF lv IS INITIAL. RETURN. ENDIF.
+  DATA(nbsp)  = cl_abap_conv_in_ce=>uccp( '00A0' ).
+  DATA(nnbsp) = cl_abap_conv_in_ce=>uccp( '202F' ).
+  DATA rx_ws TYPE string. rx_ws = |[{ nbsp }{ nnbsp }[:space:]]+|.
+  REPLACE ALL OCCURRENCES OF REGEX rx_ws IN lv WITH ''.
+  REPLACE ALL OCCURRENCES OF '.' IN lv WITH ''.
+  REPLACE ALL OCCURRENCES OF ',' IN lv WITH '.'.
+  TRY. cv_qty = CONV decfloat34( lv ).
+    CATCH cx_sy_conversion_no_number. CLEAR cv_qty.
+  ENDTRY.
+ENDFORM.
+
+FORM check_number USING iv_val TYPE string iv_idx TYPE i CHANGING cv_msg TYPE string.
+  CLEAR cv_msg.
+  IF iv_val IS INITIAL. RETURN. ENDIF.
+  REPLACE ALL OCCURRENCES OF ',' IN iv_val WITH '.'.
+  TRY. DATA n TYPE decfloat34. n = CONV decfloat34( iv_val ).
+    CATCH cx_sy_conversion_no_number.
+      cv_msg = |Nieprawidłowa liczba w kolumnie { iv_idx } ({ iv_val })|.
+  ENDTRY.
+ENDFORM.
+
+
+************************************************************************
+* Odczyt TSV + SAP dane + walidacje (fragment z logiem składników mianownika)
+************************************************************************
+FORM read_tsv USING    i_file TYPE string
+              CHANGING ct_rows TYPE ty_t_rows.
+
+* Tabela do zbierania logów
+  DATA: lt_log TYPE STANDARD TABLE OF string,
+        lv_log TYPE string.
+
+  DATA lt_lines TYPE STANDARD TABLE OF string.
+  DATA lv_line  TYPE string.
+  DATA lv_row   TYPE i.
+  DATA lv_wydzial TYPE char15.
+
+* Określenie wydziału z nazwy pliku               " <-- NOWA LINIA
+  PERFORM determine_wydzial USING i_file CHANGING lv_wydzial.  " <-- NOWA LINIA
+
+
+  CALL FUNCTION 'GUI_UPLOAD'
+    EXPORTING filename = i_file filetype = 'ASC'
+    TABLES    data_tab = lt_lines
+    EXCEPTIONS OTHERS  = 1.
+  IF sy-subrc <> 0. MESSAGE 'Błąd odczytu pliku' TYPE 'E'. ENDIF.
+
+  CLEAR ct_rows. lv_row = 0.
+
+* Nagłówek tylko do pliku logu - nie wpływa na ct_rows!
+  APPEND 'Data;Linia;NrZlecenia;Zmiana;Ilość;Przejście;Przezbrojenie;Przerwy;CzasTrwania;CzasPrzejscia;CzasPrzezbrojenia;CzasAwarie;CzasEfektywny;Norma;Plan' TO lt_log.
+
+  LOOP AT lt_lines INTO lv_line.
+    ADD 1 TO lv_row.
+    IF lv_row = 1. CONTINUE. ENDIF.
+
+    DATA: c1  TYPE string,  c2  TYPE string,  c3  TYPE string,
+          c4  TYPE string,  c5  TYPE string,  c6  TYPE string,
+          c7  TYPE string,  c8  TYPE string,  c9  TYPE string,
+          c10 TYPE string,  c11 TYPE string,  c12 TYPE string,
+          c13 TYPE string,  c14 TYPE string,  c15 TYPE string,
+          c16 TYPE string,  c17 TYPE string,  c18 TYPE string,
+          c19 TYPE string,  c20 TYPE string,  c21 TYPE string,
+          c22 TYPE string,  c23 TYPE string,  c24 TYPE string,
+          c25 TYPE string,  c26 TYPE string,  c27 TYPE string,
+          c28 TYPE string,  c29 TYPE string,  c30 TYPE string,
+          c31 TYPE string,  c32 TYPE string,  c33 TYPE string,
+          c34 TYPE string,  c35 TYPE string,  c36 TYPE string,
+          c37 TYPE string,  c38 TYPE string.
+
+    SPLIT lv_line AT c_tab INTO
+      c1  c2  c3  c4  c5  c6  c7  c8  c9
+      c10 c11 c12 c13 c14 c15 c16 c17 c18 c19
+      c20 c21 c22 c23 c24 c25 c26 c27 c28 c29
+      c30 c31 c32 c33 c34 c35 c36 c37 c38.
+
+
+
+    DATA ls TYPE ty_row.
+    CLEAR ls.
+ls-col1  = c1.  ls-col2  = c2.  ls-col3  = c3.  ls-col4 = c4.
+ls-col5  = c5.  ls-col6  = c6.  ls-col7  = c7.  ls-col8 = c8.
+ls-col9  = c9.  ls-col10 = c10. ls-col11 = c11. ls-col12 = c12.
+ls-col13 = c13. ls-col14 = c14. ls-col15 = c15. ls-col16 = c16.
+ls-col17 = c17. ls-col18 = c18. ls-col19 = c19. ls-col20 = c20.
+ls-col21 = c21. ls-col22 = c22. ls-col23 = c23. ls-col24 = c24.
+ls-col25 = c25. ls-col26 = c26. ls-col27 = c27. ls-col28 = c28.
+ls-col29 = c29. ls-col30 = c30. ls-col31 = c31. ls-col32 = c32.
+ls-col33 = c33. ls-col34 = c34. ls-col35 = c35. ls-col36 = c36.
+ls-col37 = c37. ls-col38 = c38.
+
+ls-wydzial = lv_wydzial.
+
+DATA(lv_osoby_rzecz) = c13.
+REPLACE ALL OCCURRENCES OF ',' IN lv_osoby_rzecz WITH '.'.
+ls-osoby_rzecz = lv_osoby_rzecz.
+
+CLEAR: ls-status, ls-valid, ls-aufnr_int, ls-matnr, ls-maktx,
+       ls-arbpl, ls-ktxt, ls-bmsch_norma, ls-norma_val, ls-min_na_szt,
+       ls-norma_txt, ls-czas_trw, ls-czas_przerwy, ls-czas_przejscia,
+       ls-czas_przezbr, ls-czas_awarie, ls-czas_orga, ls-czas_efektywny,
+       ls-plan_norma, ls-wydajnosc_proc, ls-osoby_norma.
+
+    IF p_fixhh = abap_true.
+      PERFORM fix_hhmm CHANGING ls-col7.
+      PERFORM fix_hhmm CHANGING ls-col8.
+    ENDIF.
+
+    DATA lv_msg TYPE string.
+    PERFORM check_date USING ls-col2 CHANGING lv_msg.
+    IF lv_msg IS NOT INITIAL. ls-status = ls-status && lv_msg && '; '. ENDIF.
+    PERFORM check_hhmm USING ls-col7 'Start'  CHANGING lv_msg.
+    IF lv_msg IS NOT INITIAL. ls-status = ls-status && lv_msg && '; '. ENDIF.
+    PERFORM check_hhmm USING ls-col8 'Koniec' CHANGING lv_msg.
+    IF lv_msg IS NOT INITIAL. ls-status = ls-status && lv_msg && '; '. ENDIF.
+
+    " czas trwania
+    IF ls-col7 IS NOT INITIAL AND ls-col8 IS NOT INITIAL.
+      DATA: v7 TYPE string, v8 TYPE string, sh TYPE i, sm TYPE i, eh TYPE i, em TYPE i, s TYPE i, e TYPE i.
+      v7 = ls-col7. REPLACE ALL OCCURRENCES OF ':' IN v7 WITH ''.
+      v8 = ls-col8. REPLACE ALL OCCURRENCES OF ':' IN v8 WITH ''.
+      sh = v7(2). sm = v7+2(2). eh = v8(2). em = v8+2(2).
+      s = sh * 60 + sm. e = eh * 60 + em.
+      IF e >= s. ls-czas_trw = e - s. ELSE. ls-czas_trw = ( 24 * 60 - s ) + e. ENDIF.
+    ENDIF.
+
+    " SAP: zlecenie, materiał, linia, norma, osoby
+    DATA lv_aufnr_tmp TYPE string. DATA lv_aufpl TYPE afko-aufpl.
+    DATA lv_bmsch_min TYPE afvv-bmsch. DATA lv_osoby TYPE afvc-anzma.
+    lv_aufnr_tmp = ls-col5. CONDENSE lv_aufnr_tmp NO-GAPS.
+
+    " Pobierz normę linii z tabeli ZSTLINIENORMA
+    DATA lv_linia_upper TYPE char30.
+    DATA lv_norma_linia TYPE decfloat34.
+    DATA lv_norma_int   TYPE int4.              " Pomocnicza zmienna dla SELECT
+    CLEAR lv_norma_linia.
+
+    IF ls-col4 IS NOT INITIAL AND lv_wydzial IS NOT INITIAL.
+      lv_linia_upper = ls-col4.
+      TRANSLATE lv_linia_upper TO UPPER CASE.
+
+      " Pobierz INT4 z bazy, potem konwertuj na DECFLOAT34
+      SELECT SINGLE norma
+        FROM zstlinienorma
+        WHERE wydzial = @lv_wydzial
+          AND linia   = @lv_linia_upper
+        INTO @lv_norma_int.
+
+      IF sy-subrc = 0.
+        lv_norma_linia = lv_norma_int.          " Automatyczna konwersja
+        ls-norma_linia = lv_norma_linia.
+      ENDIF.
+    ENDIF.
+
+
+    IF lv_aufnr_tmp IS NOT INITIAL AND lv_aufnr_tmp CO '0123456789'.
+      ls-aufnr_int = lv_aufnr_tmp.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING input  = ls-aufnr_int
+        IMPORTING output = ls-aufnr_int.
+
+      SELECT SINGLE plnbez, aufpl FROM afko WHERE aufnr = @ls-aufnr_int
+        INTO (@ls-matnr, @lv_aufpl).
+
+      IF sy-subrc = 0 AND ls-matnr IS NOT INITIAL.
+        SELECT SINGLE maktx FROM makt WHERE matnr = @ls-matnr AND spras = 'L'
+          INTO @ls-maktx.
+
+        SELECT SINGLE m~mdv01, t~ktext
+          FROM mkal AS m
+          LEFT JOIN crhd AS c ON c~arbpl = m~mdv01 AND c~werks = m~werks
+          LEFT JOIN crtx AS t ON t~objid = c~objid AND t~spras = 'L'
+          WHERE m~matnr = @ls-matnr AND m~werks = 'ZC01'
+          INTO (@ls-arbpl, @ls-ktxt).
+
+        SELECT MIN( afvv~bmsch )
+          FROM afvv
+          INNER JOIN afvc
+            ON afvv~aufpl = afvc~aufpl AND afvv~aplzl = afvc~aplzl
+          WHERE afvv~aufpl = @lv_aufpl
+            AND afvc~steus LIKE 'DR%'
+            AND afvv~bmsch > 9
+          INTO @lv_bmsch_min.
+
+
+
+
+
+        " ===== PRIORYTETYZACJA NORMY: Tabela ZSTLINIENORMA > Marszruta =====
+        DATA lv_norma_do_uzycia TYPE decfloat34.
+        DATA lv_zrodlo_normy    TYPE string.
+
+        " 1) Sprawdź czy jest ręczna norma z tabeli
+        IF ls-norma_linia IS NOT INITIAL AND ls-norma_linia > 0.
+          lv_norma_do_uzycia = ls-norma_linia.
+          lv_zrodlo_normy    = 'RĘCZNA'.
+          ls-bmsch_norma     = ls-norma_linia.
+
+        " 2) Jeśli nie, użyj normy z marszruty
+        ELSEIF sy-subrc = 0 AND lv_bmsch_min > 0.
+          lv_norma_do_uzycia = lv_bmsch_min.
+          lv_zrodlo_normy    = 'MARSZRUTA'.
+          ls-bmsch_norma     = lv_bmsch_min.
+          ls-norma_linia     = lv_bmsch_min.     " <-- NOWA LINIA - przepisz do NORMA_LINIA
+        ENDIF.
+
+        " 3) Oblicz wartości pochodne (jeśli norma istnieje)
+        IF lv_norma_do_uzycia > 0.
+          DATA v1 TYPE decfloat34. DATA v2 TYPE decfloat34.
+          v1 = lv_norma_do_uzycia / 480.      " szt/min
+          v2 = 480 / lv_norma_do_uzycia.      " min/szt
+          PERFORM round3 USING v1 CHANGING ls-norma_val.
+          PERFORM round3 USING v2 CHANGING ls-min_na_szt.
+          ls-norma_txt = |{ lv_norma_do_uzycia } szt/8h ({ lv_zrodlo_normy }) → { ls-norma_val } szt/min|.
+        ENDIF.
+
+
+
+
+
+
+        CLEAR lv_osoby.
+        SELECT SUM( anzma ) FROM afvc WHERE aufpl = @lv_aufpl AND steus NOT LIKE 'Q%'
+          INTO @lv_osoby.
+        IF sy-subrc = 0 AND lv_osoby IS NOT INITIAL.
+          ls-osoby_norma = lv_osoby.
+        ENDIF.
+
+         " Pole pomocnicze – poprawka dla DUO (literka T w ls-col9)
+IF ls-col9 = 'C'.
+  ls-osoby_norm_corr = ls-osoby_norma * 4.
+ELSEIF ls-col9 = 'T'.
+  ls-osoby_norm_corr = ls-osoby_norma * 2.
+ELSE.
+  ls-osoby_norm_corr = ls-osoby_norma.
+ENDIF.
+
+
+      ENDIF.
+    ENDIF.
+
+" czasy dodatkowe
+IF ls-col22 IS NOT INITIAL. ls-czas_przerwy = ls-col22 * 15. ENDIF.
+
+" Konwersja czasu przejścia z formatu HHMM na minuty
+IF ls-col16 IS NOT INITIAL.
+  PERFORM hhmm_to_minutes USING ls-col16 CHANGING ls-czas_przejscia.
+ENDIF.
+
+" Konwersja czasu przezbrojenia z formatu HHMM na minuty
+IF ls-col17 IS NOT INITIAL.
+  PERFORM hhmm_to_minutes USING ls-col17 CHANGING ls-czas_przezbr.
+ENDIF.
+
+
+" Konwersja czasu organizacyjnego z formatu HHMM na minuty
+IF ls-col18 IS NOT INITIAL.
+  PERFORM hhmm_to_minutes USING ls-col18 CHANGING ls-czas_orga.
+ENDIF.
+
+
+    DATA lv_aw TYPE i. CLEAR lv_aw.
+    DO 5 TIMES.
+      DATA i_time TYPE i. DATA i_zos TYPE i.
+      FIELD-SYMBOLS: <awt> TYPE any, <zos> TYPE any.
+      i_time = 25 + ( sy-index - 1 ) * 3.  " 25,28,31,34,37 – minuty awarii
+      i_zos  = i_time + 1.                 " 26,29,32,35,38 – pole Z/O
+      ASSIGN COMPONENT i_time OF STRUCTURE ls TO <awt>.
+      ASSIGN COMPONENT i_zos  OF STRUCTURE ls TO <zos>.
+      IF <awt> IS ASSIGNED AND <zos> IS ASSIGNED.
+        IF <awt> IS NOT INITIAL.
+          DATA(lv_flag) = CONV string( <zos> ).
+          CONDENSE lv_flag.
+          TRANSLATE lv_flag TO UPPER CASE.
+          IF lv_flag <> 'Z'.
+            lv_aw = lv_aw + CONV i( <awt> ).
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDDO.
+    ls-czas_awarie = lv_aw.
+
+    IF ls-czas_trw > 0 AND ls-norma_val > 0.
+      ls-czas_efektywny = ls-czas_trw - ls-czas_przejscia - ls-czas_przezbr - ls-czas_orga.
+      IF ls-czas_efektywny < 0. ls-czas_efektywny = 0. ENDIF.
+
+      DATA(lv_plan) = ls-norma_val * ls-czas_efektywny.
+      PERFORM round3 USING lv_plan CHANGING ls-plan_norma.
+
+      " LOGUJ wszystkie składowe planu (mianownika wydajności)
+      lv_log = |{ ls-col2 }| && ';' && |{ ls-col4 }| && ';' && |{ ls-col5 }| && ';' &&
+               |{ ls-col6 }| && ';' && |{ ls-col10 }| && ';' && |{ ls-col16 }| && ';' &&
+               |{ ls-col17 }| && ';' && |{ ls-col22 }| && ';' &&
+               |{ ls-czas_trw }| && ';' && |{ ls-czas_przejscia }| && ';' &&
+               |{ ls-czas_przezbr }| && ';' && |{ ls-czas_awarie }| && ';' &&
+               |{ ls-czas_efektywny }| && ';' && |{ ls-norma_val }| && ';' && |{ ls-plan_norma }|.
+      APPEND lv_log TO lt_log.
+
+IF ls-col9 = 'T'.
+  ls-czas_trw        = ls-czas_trw        / 2.
+  ls-czas_efektywny  = ls-czas_efektywny  / 2.
+  ls-czas_awarie     = ls-czas_awarie     / 2.
+  ls-czas_przejscia  = ls-czas_przejscia  / 2.
+  ls-czas_przezbr    = ls-czas_przezbr    / 2.
+  ls-czas_przerwy    = ls-czas_przerwy    / 2.
+  ls-czas_orga       = ls-czas_orga       / 2.
+ELSEIF ls-col9 = 'C'.
+  ls-czas_trw        = ls-czas_trw        / 4.
+  ls-czas_efektywny  = ls-czas_efektywny  / 4.
+  ls-czas_awarie     = ls-czas_awarie     / 4.
+  ls-czas_przejscia  = ls-czas_przejscia  / 4.
+  ls-czas_przezbr    = ls-czas_przezbr    / 4.
+  ls-czas_przerwy    = ls-czas_przerwy    / 4.
+  ls-czas_orga       = ls-czas_orga       / 4.
+ELSEIF ls-col9 = 'D'.   " D gdy produkujemy na 3 produkty np. af6 3 kol
+  ls-czas_trw        = ls-czas_trw        / 3.
+  ls-czas_efektywny  = ls-czas_efektywny  / 3.
+  ls-czas_awarie     = ls-czas_awarie     / 3.
+  ls-czas_przejscia  = ls-czas_przejscia  / 3.
+  ls-czas_przezbr    = ls-czas_przezbr    / 3.
+  ls-czas_przerwy    = ls-czas_przerwy    / 3.
+  ls-czas_orga       = ls-czas_orga       / 3.
+ENDIF.
+
+      IF ls-plan_norma > 0 AND ls-col10 IS NOT INITIAL.
+        DATA q TYPE decfloat34.
+        PERFORM parse_qty USING ls-col10 CHANGING q.
+        IF q IS NOT INITIAL.
+          DATA ww TYPE decfloat34.
+          ww = ( q / ls-plan_norma ) * 100.
+          PERFORM round3 USING ww CHANGING ls-wydajnosc_proc.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF ls-status IS NOT INITIAL.
+      SHIFT ls-status RIGHT DELETING TRAILING '; '.
+    ENDIF.
+
+    IF ls-col2 IS NOT INITIAL AND ls-col4 IS NOT INITIAL AND ls-col6 IS NOT INITIAL
+       AND ( ls-czas_trw > 0 OR ls-plan_norma > 0 ).
+      ls-valid = abap_true.
+    ELSE.
+      ls-valid = abap_false.
+    ENDIF.
+
+    APPEND ls TO ct_rows.
+  ENDLOOP.
+
+* Zapisz log do pliku na froncie (C:\Temp\log_plan_norma.txt)
+*  CALL FUNCTION 'GUI_DOWNLOAD'
+*    EXPORTING
+*      filename = 'C:\Temp\log_plan_norma.txt'
+*      filetype = 'ASC'
+*    TABLES
+*      data_tab = lt_log
+*    EXCEPTIONS
+*      OTHERS = 1.
+
+ENDFORM.
+
+
+
+************************************************************************
+* Agregacja
+************************************************************************
+FORM build_agg USING it_rows TYPE ty_t_rows CHANGING ct_agg TYPE ty_t_agg.
+  DATA lt_hash TYPE HASHED TABLE OF ty_agg WITH UNIQUE KEY data_d linia_plik zmiana nr_zlecenia.  " ← DODANE nr_zlecenia
+
+  LOOP AT it_rows INTO DATA(ls).
+    IF p_onlyok = abap_true AND ls-valid <> abap_true.
+      CONTINUE.
+    ENDIF.
+
+*      " POMIŃ jeśli numer zlecenia jest pusty
+*  IF ls-col5 IS INITIAL.
+*    CONTINUE.
+*  ENDIF.
+
+
+    DATA q TYPE decfloat34. CLEAR q.
+    IF ls-col10 IS NOT INITIAL.
+      PERFORM parse_qty USING ls-col10 CHANGING q.
+    ENDIF.
+
+    READ TABLE lt_hash ASSIGNING FIELD-SYMBOL(<a>)
+         WITH TABLE KEY data_d      = ls-col2
+                        linia_plik  = ls-col4
+                        zmiana      = ls-col6
+                        nr_zlecenia = ls-col5.       " ← DODANE (kolumna z numerem zlecenia)
+IF sy-subrc <> 0.
+  DATA nx TYPE ty_agg.
+  CLEAR nx.  " Pełne zerowanie struktury
+
+  nx-data_d     = ls-col2.
+  nx-linia_plik = ls-col4.
+  nx-zmiana     = ls-col6.
+  nx-nr_zlecenia = ls-col5.
+  nx-matnr      = ls-matnr.
+  nx-maktx      = ls-maktx.
+  nx-wydzial    = ls-wydzial.
+  nx-norma_linia = ls-norma_linia.
+  IF ls-ktxt IS NOT INITIAL.
+    nx-nazwa_stan = ls-ktxt.
+  ELSE.
+    nx-nazwa_stan = ls-arbpl.
+  ENDIF.
+  nx-c_org_sum = 0.  " Jawna inicjalizacja pola c_org_sum
+
+
+  " === Pobierz priorytet sortowania z tabeli ZSTLINIESORT ===
+  DATA lv_linia_sort TYPE int4.
+  DATA lv_linia_upper2 TYPE char30.
+  CLEAR lv_linia_sort.
+
+  IF ls-col4 IS NOT INITIAL AND ls-wydzial IS NOT INITIAL.
+    lv_linia_upper2 = ls-col4.
+    TRANSLATE lv_linia_upper2 TO UPPER CASE.
+
+    SELECT SINGLE sort
+      FROM zstliniesort
+      WHERE wydzial = @ls-wydzial
+        AND linia   = @lv_linia_upper2
+      INTO @lv_linia_sort.
+
+    IF sy-subrc = 0.
+      nx-linia_sort = lv_linia_sort.
+    ELSE.
+      nx-linia_sort = 9999.  " Domyślnie na końcu (brak w tabeli)
+    ENDIF.
+  ELSE.
+    nx-linia_sort = 9999.  " Brak wydziału/linii
+  ENDIF.
+
+  INSERT nx INTO TABLE lt_hash ASSIGNING <a>.
+ENDIF.
+
+
+
+
+
+
+    <a>-qty_sum         += q.
+    <a>-plan_sum        += ls-plan_norma.
+    <a>-rec_count       += 1.
+    <a>-osoby_sum       += CONV decfloat34( ls-osoby_norma ).
+    <a>-osoby_rzecz_wsum += CONV decfloat34( ls-osoby_rzecz ) * CONV decfloat34( ls-czas_trw ).
+    <a>-osoby_norm_wsum  += CONV decfloat34( ls-osoby_norm_corr ) * CONV decfloat34( ls-czas_trw ).
+
+    " Przepisz normę linii (używamy pierwszej niepustej wartości - norma jest stała dla linii)
+    IF <a>-norma_linia = 0 AND ls-norma_linia > 0.    " <-- NOWA LOGIKA
+      <a>-norma_linia = ls-norma_linia.               " <-- Przepisz raz
+    ENDIF.
+
+<a>-c_trwania_sum   += ls-czas_trw.
+<a>-c_przej_sum     += ls-czas_przejscia.
+<a>-c_przezbr_sum   += ls-czas_przezbr.
+<a>-c_przerwy_sum   += ls-czas_przerwy.
+<a>-c_pracy_sum     += ls-czas_efektywny.
+<a>-c_awarie_sum    += ls-czas_awarie.
+<a>-c_org_sum       += ls-czas_orga.
+
+    " Awaria1..Awaria5 = kolumny col24, col27, col30, col33, col36
+    DATA: lt_aw TYPE STANDARD TABLE OF string WITH EMPTY KEY,
+          lv_tx TYPE string.
+    CLEAR lt_aw.
+    APPEND ls-col24 TO lt_aw.
+    APPEND ls-col27 TO lt_aw.
+    APPEND ls-col30 TO lt_aw.
+    APPEND ls-col33 TO lt_aw.
+    APPEND ls-col36 TO lt_aw.
+
+    LOOP AT lt_aw INTO lv_tx.
+      CONDENSE lv_tx.
+      IF lv_tx IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      IF <a>-awarie_txt_sum CS lv_tx.
+        CONTINUE.
+      ENDIF.
+      IF <a>-awarie_txt_sum IS INITIAL.
+        <a>-awarie_txt_sum = lv_tx.
+      ELSE.
+        <a>-awarie_txt_sum = <a>-awarie_txt_sum && ' | ' && lv_tx.
+      ENDIF.
+    ENDLOOP.
+
+  ENDLOOP.
+
+  CLEAR ct_agg.
+  LOOP AT lt_hash INTO DATA(a).
+    IF a-nazwa_stan IS INITIAL.
+      a-nazwa_stan = '~~~~~~~~'.
+    ENDIF.
+
+    IF a-rec_count > 0.
+      a-osoby_avg = a-osoby_sum / a-rec_count.
+    ENDIF.
+
+    IF a-plan_sum > 0.
+      a-wyd_wazona   = ( a-qty_sum / a-plan_sum ) * 100.
+      PERFORM round3 USING a-wyd_wazona CHANGING a-wyd_wazona.
+      a-wyd_waz_disp = a-wyd_wazona.
+    ENDIF.
+
+    " ŚREDNIE WAŻONE: osoby normatywne i rzeczywiste względem czasu trwania
+    IF a-c_trwania_sum > 0.
+      a-osoby_norm_avg  = a-osoby_norm_wsum  / a-c_trwania_sum.
+      a-osoby_rzecz_avg = a-osoby_rzecz_wsum / a-c_trwania_sum.
+    ENDIF.
+    " Konwersja PLAN_SUM do INT4 (dla wyświetlania)          " <-- DODAJ TĘ LINIĘ
+    a-plan_sum_int = a-plan_sum.                             " <-- DODAJ TĘ LINIĘ
+
+
+    APPEND a TO ct_agg.
+  ENDLOOP.
+ENDFORM.
+
+
+
+************************************************************************
+* Roll-upy i kolory totali (SUMA średnich osób w Σ)
+************************************************************************
+FORM build_rollups USING it_agg_in TYPE ty_t_agg CHANGING ct_agg_out TYPE ty_t_agg.
+
+  FIELD-SYMBOLS <s> TYPE ty_agg.
+  DATA lt_dz TYPE HASHED TABLE OF ty_agg WITH UNIQUE KEY data_d zmiana.
+  DATA lt_d  TYPE HASHED TABLE OF ty_agg WITH UNIQUE KEY data_d.
+  DATA lt_linia TYPE HASHED TABLE OF ty_agg WITH UNIQUE KEY data_d zmiana linia_plik.  " <-- NOWA LINIA
+  CLEAR ct_agg_out.
+
+   " === Zmienne do srednich wazonych ===
+  DATA lv_num_rzecz TYPE decfloat34.
+  DATA lv_num_norm  TYPE decfloat34.
+  DATA lv_den       TYPE decfloat34.
+  DATA lv_lin_num_rzecz TYPE decfloat34.
+  DATA lv_lin_num_norm  TYPE decfloat34.
+  DATA lv_lin_den       TYPE decfloat34.
+  DATA lv_day_num_rzecz TYPE decfloat34.
+  DATA lv_day_num_norm  TYPE decfloat34.
+  DATA lv_day_den       TYPE decfloat34.
+  DATA lv_tmp  TYPE decfloat34.
+  DATA lv_tmp2 TYPE decfloat34.
+
+
+  LOOP AT it_agg_in ASSIGNING <s>.
+    <s>-sort_total = 0.
+    <s>-linia_base = <s>-linia_plik.           " <-- NOWA LINIA (bez " Σ")
+    APPEND <s> TO ct_agg_out.
+
+     " ===== AGREGACJA Σ LINIA (nowa) =====                                    " <-- NOWA SEKCJA
+    READ TABLE lt_linia ASSIGNING FIELD-SYMBOL(<linia>)                       " <-- NOWA LINIA
+         WITH TABLE KEY data_d = <s>-data_d                                    " <-- NOWA LINIA
+                        zmiana = <s>-zmiana                                    " <-- NOWA LINIA
+                        linia_plik = <s>-linia_plik.                           " <-- NOWA LINIA
+    IF sy-subrc <> 0.                                                          " <-- NOWA LINIA
+      DATA lin TYPE ty_agg.                                                    " <-- NOWA LINIA
+      lin-data_d     = <s>-data_d.                                             " <-- NOWA LINIA
+      lin-zmiana     = <s>-zmiana.                                             " <-- NOWA LINIA
+      lin-linia_plik = <s>-linia_plik.
+      lin-linia_sort = <s>-linia_sort.                                         " <-- NOWA LINIA
+      lin-wydzial    = <s>-wydzial.                                            " <-- NOWA LINIA
+      lin-norma_linia = <s>-norma_linia.                                       " <-- NOWA LINIA
+      lin-plan_sum_int = <s>-plan_sum_int.                                     " <-- NOWA LINIA
+      INSERT lin INTO TABLE lt_linia ASSIGNING <linia>.                        " <-- NOWA LINIA
+    ENDIF.                                                                     " <-- NOWA LINIA
+                                                                               " <-- NOWA LINIA
+    IF <s>-nr_zlecenia IS NOT INITIAL.                                         " <-- NOWA LINIA
+      <linia>-qty_sum       += <s>-qty_sum.                                    " <-- NOWA LINIA
+      <linia>-plan_sum      += <s>-plan_sum.                                   " <-- NOWA LINIA
+      <linia>-rec_count     += <s>-rec_count.                                  " <-- NOWA LINIA
+      <linia>-osoby_sum     += <s>-osoby_sum.                                  " <-- NOWA LINIA
+      <linia>-c_przej_sum   += <s>-c_przej_sum.                                " <-- NOWA LINIA
+      <linia>-c_przezbr_sum += <s>-c_przezbr_sum.                              " <-- NOWA LINIA
+      <linia>-c_przerwy_sum += <s>-c_przerwy_sum.                              " <-- NOWA LINIA
+      <linia>-c_pracy_sum   += <s>-c_pracy_sum.                                " <-- NOWA LINIA
+      <linia>-c_awarie_sum  += <s>-c_awarie_sum.                               " <-- NOWA LINIA
+      <linia>-osoby_norm_wsum  += <s>-osoby_norm_wsum.                         " <-- NOWA LINIA
+      <linia>-osoby_rzecz_wsum += <s>-osoby_rzecz_wsum.                        " <-- NOWA LINIA
+      <linia>-c_trwania_sum    += <s>-c_trwania_sum.                           " <-- NOWA LINIA
+      <linia>-c_org_sum      += <s>-c_org_sum.                                 " <-- NOWA LINIA
+    ENDIF.                                                                     " <-- NOWA LINIA
+
+    " ===== AGREGACJA Σ ZMIANY (istniejąca) =====
+
+
+
+
+    READ TABLE lt_dz ASSIGNING FIELD-SYMBOL(<dz>)
+         WITH TABLE KEY data_d = <s>-data_d zmiana = <s>-zmiana.
+    IF sy-subrc <> 0.
+      DATA dz TYPE ty_agg.
+      dz-data_d = <s>-data_d.
+      dz-zmiana = <s>-zmiana.
+      dz-wydzial = <s>-wydzial.
+      dz-norma_linia = <s>-norma_linia.
+      dz-plan_sum_int = <s>-plan_sum_int.
+      dz-matnr = <s>-matnr.
+      dz-maktx = <s>-maktx.
+      INSERT dz INTO TABLE lt_dz ASSIGNING <dz>.
+    ENDIF.
+    IF <s>-nr_zlecenia IS NOT INITIAL.
+    <dz>-qty_sum       += <s>-qty_sum.
+    <dz>-plan_sum      += <s>-plan_sum.
+    <dz>-rec_count     += <s>-rec_count.
+    <dz>-osoby_sum     += <s>-osoby_sum.
+<dz>-c_przej_sum   += <s>-c_przej_sum.
+<dz>-c_przezbr_sum += <s>-c_przezbr_sum.
+<dz>-c_przerwy_sum += <s>-c_przerwy_sum.
+<dz>-c_pracy_sum   += <s>-c_pracy_sum.
+<dz>-c_awarie_sum  += <s>-c_awarie_sum.
+<dz>-osoby_norm_wsum  += <s>-osoby_norm_wsum.
+<dz>-osoby_rzecz_wsum += <s>-osoby_rzecz_wsum.
+<dz>-c_trwania_sum    += <s>-c_trwania_sum.
+<dz>-c_org_sum      += <s>-c_org_sum.
+    ENDIF.
+
+    READ TABLE lt_d ASSIGNING FIELD-SYMBOL(<d>) WITH TABLE KEY data_d = <s>-data_d.
+    IF sy-subrc <> 0.
+      DATA dd TYPE ty_agg. dd-data_d = <s>-data_d.
+      dd-wydzial = <s>-wydzial.
+      dd-norma_linia = <s>-norma_linia.
+      dd-plan_sum_int = <s>-plan_sum_int.
+      dd-matnr = <s>-matnr.
+      dd-maktx = <s>-maktx.
+      INSERT dd INTO TABLE lt_d ASSIGNING <d>.
+    ENDIF.
+    IF <s>-nr_zlecenia IS NOT INITIAL.
+    <d>-qty_sum       += <s>-qty_sum.
+    <d>-plan_sum      += <s>-plan_sum.
+    <d>-rec_count     += <s>-rec_count.
+    <d>-osoby_sum     += <s>-osoby_sum.
+<d>-c_przej_sum   += <s>-c_przej_sum.
+<d>-c_przezbr_sum += <s>-c_przezbr_sum.
+<d>-c_przerwy_sum += <s>-c_przerwy_sum.
+<d>-c_pracy_sum   += <s>-c_pracy_sum.
+<d>-c_awarie_sum  += <s>-c_awarie_sum.
+<d>-osoby_norm_wsum  += <s>-osoby_norm_wsum.
+<d>-osoby_rzecz_wsum += <s>-osoby_rzecz_wsum.
+<d>-c_trwania_sum    += <s>-c_trwania_sum.
+<d>-c_org_sum      += <s>-c_org_sum.
+    ENDIF.
+  ENDLOOP.
+
+  DATA cols TYPE STANDARD TABLE OF lvc_fname WITH EMPTY KEY.
+  APPEND 'DATA_D'          TO cols.
+  APPEND 'ZMIANA'          TO cols.
+  APPEND 'LINIA_PLIK'      TO cols.
+  APPEND 'WYDZIAL'         TO cols.    " ← NOWA LINIA
+  APPEND 'NR_ZLECENIA'     TO cols.
+  APPEND 'MATNR'           TO cols.
+  APPEND 'MAKTX'           TO cols.
+  APPEND 'NORMA_LINIA'     TO cols.    " ← NOWA LINIA
+  APPEND 'QTY_SUM'         TO cols.
+  APPEND 'PLAN_SUM_INT'    TO cols.    " ← NOWA LINIA (zamiast PLAN_SUM)
+  APPEND 'REC_COUNT'       TO cols.
+  APPEND 'OSOBY_AVG'       TO cols.
+  APPEND 'OSOBY_RZECZ_AVG' TO cols.
+  APPEND 'OSOBY_NORM_AVG'  TO cols.
+*  APPEND 'WYD_WAZ_DISP'    TO cols.
+  APPEND 'C_TRWANIA_SUM'   TO cols.
+  APPEND 'C_AWARIE_SUM'    TO cols.
+  APPEND 'AWARIE_TXT_SUM'  TO cols.
+  APPEND 'C_PRZEJ_SUM'     TO cols.
+  APPEND 'C_PRZEZBR_SUM'   TO cols.
+  APPEND 'C_PRZERWY_SUM'   TO cols.
+  APPEND 'C_PRACY_SUM'     TO cols.
+  APPEND 'C_ORG_SUM'       TO cols.
+  APPEND 'NAZWA_STAN'      TO cols.
+
+
+
+
+
+
+
+
+
+
+
+  DATA f TYPE lvc_fname.
+
+  " ----- Σ LINIA (NOWA SEKCJA) -----
+  LOOP AT lt_linia ASSIGNING <linia>.
+
+    " === POLICZ ILE UNIKALNYCH ZLECEŃ MA TA LINIA ===
+    DATA: lv_zlecen_count TYPE i,
+          lt_zlec_tmp     TYPE STANDARD TABLE OF string.
+    CLEAR: lv_zlecen_count, lt_zlec_tmp.
+
+    LOOP AT it_agg_in INTO DATA(l_count)
+      WHERE data_d = <linia>-data_d
+        AND zmiana = <linia>-zmiana
+        AND linia_plik = <linia>-linia_plik
+        AND nr_zlecenia IS NOT INITIAL.
+
+      " Dodaj zlecenie do listy unikalnych
+      READ TABLE lt_zlec_tmp TRANSPORTING NO FIELDS WITH KEY table_line = l_count-nr_zlecenia.
+      IF sy-subrc <> 0.
+        APPEND l_count-nr_zlecenia TO lt_zlec_tmp.
+        ADD 1 TO lv_zlecen_count.
+      ENDIF.
+    ENDLOOP.
+
+    " === POMIŃ SUMĘ JEŚLI JEST TYLKO 1 ZLECENIE ===
+    IF lv_zlecen_count <= 0.
+      CONTINUE.
+    ENDIF.
+
+    DATA t_lin TYPE ty_agg. CLEAR t_lin.
+    t_lin-data_d        = <linia>-data_d.
+    t_lin-zmiana        = <linia>-zmiana.
+    t_lin-linia_plik    = |{ <linia>-linia_plik } Σ|.
+    t_lin-linia_base    = <linia>-linia_plik.
+    t_lin-linia_sort    = <linia>-linia_sort.
+    t_lin-nazwa_stan    = 'Σ (linia)'.
+    t_lin-qty_sum       = <linia>-qty_sum.
+    t_lin-plan_sum      = <linia>-plan_sum.
+    t_lin-rec_count     = <linia>-rec_count.
+    t_lin-c_pracy_sum   = <linia>-c_pracy_sum.
+    t_lin-osoby_norm_wsum = <linia>-osoby_norm_wsum.
+    t_lin-osoby_rzecz_wsum = <linia>-osoby_rzecz_wsum.
+    t_lin-c_trwania_sum = <linia>-c_trwania_sum.
+    t_lin-osoby_sum     = <linia>-osoby_sum.
+    t_lin-total_lvl     = 3.
+    t_lin-sort_total    = 1.
+    t_lin-is_total      = abap_true.
+
+    " SREDNIA WAZONA osob dla Σ LINIA
+    CLEAR: lv_lin_num_rzecz, lv_lin_num_norm, lv_lin_den.
+
+    LOOP AT it_agg_in INTO DATA(l_lin)
+      WHERE data_d = <linia>-data_d
+        AND zmiana = <linia>-zmiana
+        AND linia_plik = <linia>-linia_plik.
+      lv_lin_num_rzecz = lv_lin_num_rzecz + l_lin-osoby_rzecz_wsum.
+      lv_lin_num_norm  = lv_lin_num_norm  + l_lin-osoby_norm_wsum.
+      lv_lin_den       = lv_lin_den       + l_lin-c_trwania_sum.
+    ENDLOOP.
+
+    IF lv_lin_den > 0.
+      t_lin-osoby_rzecz_avg = lv_lin_num_rzecz / lv_lin_den.
+      t_lin-osoby_norm_avg  = lv_lin_num_norm  / lv_lin_den.
+    ELSE.
+      t_lin-osoby_rzecz_avg = 0.
+      t_lin-osoby_norm_avg  = 0.
+    ENDIF.
+
+    IF t_lin-rec_count > 0.
+      t_lin-osoby_avg = t_lin-osoby_sum / t_lin-rec_count.
+    ELSE.
+      t_lin-osoby_avg = 0.
+    ENDIF.
+
+    " Zaokraglenie do 1 miejsca
+    lv_tmp  = t_lin-osoby_rzecz_avg.
+    lv_tmp  = round( val = lv_tmp  dec = 1 ).
+    t_lin-osoby_rzecz_avg = lv_tmp.
+
+    lv_tmp2 = t_lin-osoby_norm_avg.
+    lv_tmp2 = round( val = lv_tmp2 dec = 1 ).
+    t_lin-osoby_norm_avg = lv_tmp2.
+
+    IF t_lin-plan_sum > 0.
+      t_lin-wyd_wazona   = ( t_lin-qty_sum / t_lin-plan_sum ) * 100.
+      PERFORM round3 USING t_lin-wyd_wazona CHANGING t_lin-wyd_wazona.
+      t_lin-wyd_waz_disp = t_lin-wyd_wazona.
+    ENDIF.
+
+    t_lin-plan_sum_int = t_lin-plan_sum.
+    t_lin-c_awarie_sum   = <linia>-c_awarie_sum.
+
+    " Kolory (niebieski jak Σ zmiany)
+    LOOP AT cols INTO f.
+      DATA c_lin TYPE lvc_s_scol.
+      c_lin-fname     = f.
+      c_lin-color-col = cl_gui_resources=>list_col_heading.
+      c_lin-color-int = 0.
+      c_lin-color-inv = 0.
+      APPEND c_lin TO t_lin-ctab.
+    ENDLOOP.
+
+    " === DODAJ OSOBNE KOLOROWANIE DLA WYD_WAZ_DISP ===
+    DATA c_lin_wyd TYPE lvc_s_scol.
+    c_lin_wyd-fname = 'WYD_WAZ_DISP'.
+    IF t_lin-plan_sum = 0.
+      c_lin_wyd-color-col = cl_gui_resources=>list_col_background.
+    ELSE.
+      DATA p_lin TYPE decfloat34.
+      p_lin = t_lin-wyd_wazona.
+      IF p_lin < 85.
+        c_lin_wyd-color-col = cl_gui_resources=>list_col_negative.
+        c_lin_wyd-color-int = 1.
+      ELSEIF p_lin < 95.
+        c_lin_wyd-color-col = cl_gui_resources=>list_col_total.
+        c_lin_wyd-color-int = 1.
+      ELSE.
+        c_lin_wyd-color-col = cl_gui_resources=>list_col_positive.
+        c_lin_wyd-color-int = 1.
+      ENDIF.
+    ENDIF.
+    c_lin_wyd-color-inv = 0.
+    APPEND c_lin_wyd TO t_lin-ctab.
+
+    APPEND t_lin TO ct_agg_out.
+  ENDLOOP.
+
+  " ----- Σ ZMIANY -----
+  LOOP AT lt_dz ASSIGNING <dz>.
+    DATA t1 TYPE ty_agg. CLEAR t1.
+    t1-data_d        = <dz>-data_d.
+    t1-zmiana        = |{ <dz>-zmiana } Σ|.
+    t1-linia_plik    = 'Σ (razem)'.
+    t1-linia_base    = 'ZZZZ'.
+    t1-linia_sort    = 99999.
+    t1-qty_sum       = <dz>-qty_sum.
+    t1-plan_sum      = <dz>-plan_sum.
+    t1-rec_count     = <dz>-rec_count.
+    t1-c_pracy_sum     = <dz>-c_pracy_sum.
+    t1-osoby_norm_wsum = <dz>-osoby_norm_wsum.
+    t1-osoby_rzecz_wsum = <dz>-osoby_rzecz_wsum.
+    t1-c_trwania_sum    = <dz>-c_trwania_sum.
+    t1-osoby_sum = <dz>-osoby_sum.
+    t1-total_lvl     = 2.
+    t1-sort_total    = 2.
+    t1-is_total      = abap_true.
+
+    " SUMA osob dla Σ ZMIANY (z Σ LINIA)
+    t1-osoby_rzecz_avg = 0.
+    t1-osoby_norm_avg  = 0.
+    t1-osoby_avg       = 0.
+
+    LOOP AT ct_agg_out INTO DATA(l)
+      WHERE data_d = <dz>-data_d
+        AND zmiana = <dz>-zmiana
+        AND total_lvl = 3.
+      t1-osoby_rzecz_avg = t1-osoby_rzecz_avg + l-osoby_rzecz_avg.
+      t1-osoby_norm_avg  = t1-osoby_norm_avg  + l-osoby_norm_avg.
+      t1-osoby_avg       = t1-osoby_avg       + l-osoby_avg.
+    ENDLOOP.
+
+    " Zaokraglenie do 1 miejsca
+    lv_tmp  = t1-osoby_rzecz_avg.
+    lv_tmp  = round( val = lv_tmp  dec = 1 ).
+    t1-osoby_rzecz_avg = lv_tmp.
+
+    lv_tmp2 = t1-osoby_norm_avg.
+    lv_tmp2 = round( val = lv_tmp2 dec = 1 ).
+    t1-osoby_norm_avg = lv_tmp2.
+
+    IF t1-plan_sum > 0.
+      t1-wyd_wazona   = ( t1-qty_sum / t1-plan_sum ) * 100.
+      PERFORM round3 USING t1-wyd_wazona CHANGING t1-wyd_wazona.
+      t1-wyd_waz_disp = t1-wyd_wazona.
+    ENDIF.
+    t1-plan_sum_int = t1-plan_sum.
+    t1-c_awarie_sum   = <dz>-c_awarie_sum.
+    t1-awarie_txt_sum = <dz>-awarie_txt_sum.
+
+    LOOP AT cols INTO f.
+      DATA c1 TYPE lvc_s_scol.
+      c1-fname     = f.
+      c1-color-col = cl_gui_resources=>list_col_total.
+      c1-color-int = 1.
+      c1-color-inv = 0.
+      APPEND c1 TO t1-ctab.
+    ENDLOOP.
+
+    " === DODAJ OSOBNE KOLOROWANIE DLA WYD_WAZ_DISP ===
+    DATA c1_wyd TYPE lvc_s_scol.
+    c1_wyd-fname = 'WYD_WAZ_DISP'.
+    IF t1-plan_sum = 0.
+      c1_wyd-color-col = cl_gui_resources=>list_col_background.
+    ELSE.
+      DATA p1 TYPE decfloat34.
+      p1 = t1-wyd_wazona.
+      IF p1 < 85.
+        c1_wyd-color-col = cl_gui_resources=>list_col_negative.
+        c1_wyd-color-int = 1.
+      ELSEIF p1 < 95.
+        c1_wyd-color-col = cl_gui_resources=>list_col_total.
+        c1_wyd-color-int = 1.
+      ELSE.
+        c1_wyd-color-col = cl_gui_resources=>list_col_positive.
+        c1_wyd-color-int = 1.
+      ENDIF.
+    ENDIF.
+    c1_wyd-color-inv = 0.
+    APPEND c1_wyd TO t1-ctab.
+
+    APPEND t1 TO ct_agg_out.
+  ENDLOOP.
+
+  " ----- Σ DZIEN -----
+  LOOP AT lt_d ASSIGNING <d>.
+    DATA t2 TYPE ty_agg. CLEAR t2.
+    t2-data_d        = <d>-data_d.
+    t2-zmiana        = 'Σ'.
+    t2-linia_plik    = 'Σ'.
+    t2-linia_base    = 'ZZZZZ'.
+    t2-linia_sort    = 999999.
+    t2-qty_sum       = <d>-qty_sum.
+    t2-plan_sum      = <d>-plan_sum.
+    t2-rec_count     = <d>-rec_count.
+    t2-c_pracy_sum     = <d>-c_pracy_sum.
+    t2-osoby_norm_wsum = <d>-osoby_norm_wsum.
+    t2-osoby_rzecz_wsum = <d>-osoby_rzecz_wsum.
+    t2-c_trwania_sum    = <d>-c_trwania_sum.
+    t2-osoby_sum = <d>-osoby_sum.
+    t2-total_lvl     = 1.
+    t2-sort_total    = 3.
+    t2-is_total      = abap_true.
+
+    " SUMA osob dla Σ DZIEN (z Σ ZMIANY)
+    t2-osoby_rzecz_avg = 0.
+    t2-osoby_norm_avg  = 0.
+    t2-osoby_avg       = 0.
+
+    LOOP AT ct_agg_out INTO DATA(l2)
+      WHERE data_d = t2-data_d AND total_lvl = 2.
+      t2-osoby_rzecz_avg = t2-osoby_rzecz_avg + l2-osoby_rzecz_avg.
+      t2-osoby_norm_avg  = t2-osoby_norm_avg  + l2-osoby_norm_avg.
+      t2-osoby_avg       = t2-osoby_avg       + l2-osoby_avg.
+    ENDLOOP.
+
+    " Zaokraglenie do 1 miejsca
+    lv_tmp  = t2-osoby_rzecz_avg.
+    lv_tmp  = round( val = lv_tmp  dec = 1 ).
+    t2-osoby_rzecz_avg = lv_tmp.
+
+    lv_tmp2 = t2-osoby_norm_avg.
+    lv_tmp2 = round( val = lv_tmp2 dec = 1 ).
+    t2-osoby_norm_avg = lv_tmp2.
+
+    IF t2-plan_sum > 0.
+      t2-wyd_wazona   = ( t2-qty_sum / t2-plan_sum ) * 100.
+      PERFORM round3 USING t2-wyd_wazona CHANGING t2-wyd_wazona.
+      t2-wyd_waz_disp = t2-wyd_wazona.
+    ENDIF.
+    t2-plan_sum_int = t2-plan_sum.
+    t2-c_awarie_sum   = <d>-c_awarie_sum.
+    t2-awarie_txt_sum = <d>-awarie_txt_sum.
+
+    LOOP AT cols INTO f.
+      DATA c2 TYPE lvc_s_scol.
+      c2-fname     = f.
+      c2-color-col = cl_gui_resources=>list_col_key.
+      c2-color-int = 1.
+      c2-color-inv = 1.
+      APPEND c2 TO t2-ctab.
+    ENDLOOP.
+
+    " === DODAJ OSOBNE KOLOROWANIE DLA WYD_WAZ_DISP ===
+    DATA c2_wyd TYPE lvc_s_scol.
+    c2_wyd-fname = 'WYD_WAZ_DISP'.
+    IF t2-plan_sum = 0.
+      c2_wyd-color-col = cl_gui_resources=>list_col_background.
+    ELSE.
+      DATA p2 TYPE decfloat34.
+      p2 = t2-wyd_wazona.
+      IF p2 < 85.
+        c2_wyd-color-col = cl_gui_resources=>list_col_negative.
+        c2_wyd-color-int = 1.
+      ELSEIF p2 < 95.
+        c2_wyd-color-col = cl_gui_resources=>list_col_total.
+        c2_wyd-color-int = 1.
+      ELSE.
+        c2_wyd-color-col = cl_gui_resources=>list_col_positive.
+        c2_wyd-color-int = 1.
+      ENDIF.
+    ENDIF.
+    c2_wyd-color-inv = 0.
+    APPEND c2_wyd TO t2-ctab.
+
+    APPEND t2 TO ct_agg_out.
+  ENDLOOP.
+ENDFORM.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+************************************************************************
+* Fieldcatalog / ALV / Drilldown
+************************************************************************
+FORM fc_add_fcat USING iv_name TYPE lvc_fname iv_text TYPE lvc_txt iv_len TYPE i
+                 CHANGING ct_fcat TYPE lvc_t_fcat.
+  DATA ls_f TYPE lvc_s_fcat.
+  CLEAR ls_f.
+  ls_f-fieldname = iv_name.
+  ls_f-coltext   = iv_text.
+  ls_f-outputlen = iv_len.
+  IF iv_name = 'LINIA_PLIK'. ls_f-hotspot = abap_true. ENDIF.
+  APPEND ls_f TO ct_fcat.
+ENDFORM.
+
+CLASS lcl_events DEFINITION.
+  PUBLIC SECTION.
+    METHODS on_double_click FOR EVENT double_click OF cl_gui_alv_grid
+      IMPORTING e_row e_column.
+
+    METHODS on_toolbar FOR EVENT toolbar OF cl_gui_alv_grid
+      IMPORTING e_object e_interactive.
+
+    METHODS on_user_command FOR EVENT user_command OF cl_gui_alv_grid
+      IMPORTING e_ucomm.
+
+
+ENDCLASS.
+
+CLASS lcl_events IMPLEMENTATION.
+  METHOD on_double_click.
+    IF e_row-index IS INITIAL.
+      RETURN.
+    ENDIF.
+    DATA ls TYPE ty_agg.
+    READ TABLE gt_agg2 INDEX e_row-index INTO ls.
+    IF sy-subrc <> 0 OR ls-is_total = abap_true.
+      RETURN.
+    ENDIF.
+    IF ls-data_d IS INITIAL OR ls-zmiana IS INITIAL OR ls-linia_plik IS INITIAL.
+      MESSAGE 'Brak klucza (data/zmiana/linia) dla drill-down.' TYPE 'S'.
+      RETURN.
+    ENDIF.
+
+    SUBMIT zst_test_excel_alv_filt
+      WITH p_file  = p_file
+      WITH p_date  = ls-data_d
+      WITH p_shift = ls-zmiana
+      WITH p_line  = ls-linia_plik
+      AND RETURN.
+  ENDMETHOD.
+
+
+  METHOD on_toolbar.
+    " Dodajemy 3 przyciski: Podgląd, Mail (HTML), Mail (XLSX)
+    DATA ls_btn TYPE stb_button.
+
+*    CLEAR ls_btn.
+*    ls_btn-function  = 'ZPREVIEW'.
+*    ls_btn-text      = 'Podgląd HTML'.
+*    ls_btn-quickinfo = 'Podgląd HTML (lokalnie)'.
+*    ls_btn-butn_type = 0.
+*    ls_btn-icon = icon_display.   " zamiast icon_print_preview
+*    APPEND ls_btn TO e_object->mt_toolbar.
+
+*    CLEAR ls_btn.                               " separator
+*    ls_btn-butn_type = 3.
+*    APPEND ls_btn TO e_object->mt_toolbar.
+
+    " <-- NOWA SEKCJA: Przycisk HTML v2
+    CLEAR ls_btn.
+    ls_btn-function  = 'ZPREVIEW2'.
+    ls_btn-text      = 'Podgląd HTML v2'.
+    ls_btn-quickinfo = 'Podgląd HTML v2 (z materiałem/nazwą/zleceniem)'.
+    ls_btn-butn_type = 0.
+    ls_btn-icon      = icon_wd_table.          " inny piktogram
+    APPEND ls_btn TO e_object->mt_toolbar.
+
+    CLEAR ls_btn.                               " separator
+    ls_btn-butn_type = 3.
+    APPEND ls_btn TO e_object->mt_toolbar.
+    " <-- KONIEC NOWEJ SEKCJI
+
+
+
+
+
+*    CLEAR ls_btn.
+*    ls_btn-function  = 'ZMAILHTML'.
+*    ls_btn-text      = 'Wyślij HTML'.
+*    ls_btn-quickinfo = 'Wyślij raport w treści e-maila'.
+*    ls_btn-butn_type = 0.
+*    ls_btn-icon = icon_mail.      " zamiast icon_inbox
+*    APPEND ls_btn TO e_object->mt_toolbar.
+
+    " <-- NOWY PRZYCISK: Wyślij HTML v2
+    CLEAR ls_btn.
+    ls_btn-function  = 'ZMAILHTML2'.                                     " ← NOWA FUNKCJA
+    ls_btn-text      = 'Wyślij HTML v2'.                                 " ← NOWY TEKST
+    ls_btn-quickinfo = 'Wyślij raport v2 (z materiałem) w treści e-maila'. " ← NOWY TOOLTIP
+    ls_btn-butn_type = 0.
+    ls_btn-icon      = icon_mail.                                        " ← taka sama ikonka
+    APPEND ls_btn TO e_object->mt_toolbar.
+    " <-- KONIEC NOWEGO PRZYCISKU
+
+    " <-- SEPARATOR (opcjonalnie)
+    CLEAR ls_btn.
+    ls_btn-butn_type = 3.                                                " ← separator
+    APPEND ls_btn TO e_object->mt_toolbar.
+    " <-- KONIEC SEPARATORA
+
+*    CLEAR ls_btn.
+*   ls_btn-function  = 'ZMAILXLSX'.
+*    ls_btn-text      = 'Wyślij XLSX'.
+*    ls_btn-quickinfo = 'Wyślij raport jako XLSX (załącznik)'.
+*    ls_btn-butn_type = 0.
+*    ls_btn-icon      = icon_export.             " opcjonalny piktogram
+*    APPEND ls_btn TO e_object->mt_toolbar.
+
+        " <-- NOWY PRZYCISK: Wyślij XLSX v2
+*    CLEAR ls_btn.
+*    ls_btn-function  = 'ZMAILXLSX2'.
+*    ls_btn-text      = 'Wyślij XLSX v2'.
+*    ls_btn-quickinfo = 'Wyślij raport v2 (z materiałem) jako XLSX (załącznik)'.
+*    ls_btn-butn_type = 0.
+*    ls_btn-icon      = icon_export.
+*    APPEND ls_btn TO e_object->mt_toolbar.
+
+
+    " <-- NOWY PRZYCISK: Wyślij XLS v2 (kolorowy HTML)
+    CLEAR ls_btn.
+    ls_btn-function  = 'ZMAILXLS2'.
+    ls_btn-text      = 'Wyślij XLS v2 (kolor)'.
+    ls_btn-quickinfo = 'Wyślij raport v2 jako HTML .xls (z kolorami!)'.
+    ls_btn-butn_type = 0.
+    ls_btn-icon      = icon_color.
+    APPEND ls_btn TO e_object->mt_toolbar.
+
+
+
+  ENDMETHOD.
+
+
+
+
+
+METHOD on_user_command.
+  CASE e_ucomm.
+    WHEN 'ZPREVIEW'.
+      PERFORM preview_html USING lv_full_title p_hpre.
+
+    WHEN 'ZPREVIEW2'.                                                " <-- NOWA SEKCJA
+      PERFORM preview_html_v2 USING lv_full_title p_hpre.            " <-- NOWA LINIA
+
+
+
+
+    WHEN 'ZMAILHTML'.
+      " Wysyłka HTML w treści
+      CLEAR lv_html.
+      PERFORM build_html_from_agg USING gt_agg2 CHANGING lv_html.
+      DATA lv_subject TYPE so_obj_des.
+      lv_subject = lv_full_title.
+      PERFORM send_html_simple USING lv_subject p_hpre lv_html p_email.
+
+    " <-- NOWY CASE: Wysyłka HTML v2
+    WHEN 'ZMAILHTML2'.
+      " Wysyłka HTML v2 w treści (z materiałem, nazwą, zleceniem)
+      DATA lv_html_v2 TYPE string.
+      CLEAR lv_html_v2.
+      PERFORM build_html_from_agg_v2 USING gt_agg2 CHANGING lv_html_v2.
+      DATA lv_subject_v2 TYPE so_obj_des.
+      lv_subject_v2 = lv_full_title && ' (v2)'.
+      PERFORM send_html_simple USING lv_subject_v2 p_hpre lv_html_v2 p_email.
+    " <-- KONIEC NOWEGO CASE
+
+
+
+
+
+
+    WHEN 'ZMAILXLSX'.
+      DATA: lx_xstr TYPE xstring,
+            lx_len  TYPE int4,
+            lt_bin  TYPE solix_tab,
+            lv_size TYPE so_obj_len.
+      PERFORM build_xlsx_from_tab USING gt_agg2
+                                 CHANGING lx_xstr lt_bin lx_len lv_size.
+      PERFORM send_xlsx_simple   USING p_xsub p_xmsg p_xfn lt_bin p_email.
+
+    WHEN 'ZMAILXLSX2'.
+      DATA: lx_xstr_v2 TYPE xstring,
+            lx_len_v2  TYPE int4,
+            lt_bin_v2  TYPE solix_tab,
+            lv_size_v2 TYPE so_obj_len,
+            lt_agg_copy TYPE ty_t_agg.
+
+      " Skopiuj dane i oczyść przed generowaniem XLSX
+      lt_agg_copy = gt_agg2.
+      PERFORM prepare_data_for_xlsx CHANGING lt_agg_copy.
+
+      PERFORM build_xlsx_from_tab_v2 USING lt_agg_copy
+                                    CHANGING lx_xstr_v2 lt_bin_v2 lx_len_v2 lv_size_v2.
+      DATA lv_fname_v2 TYPE so_obj_des.
+      lv_fname_v2 = 'ZST_EXCEL_AGG_v2.xlsx'.
+      PERFORM send_xlsx_simple USING 'Raport Wydajności v2 (XLSX)'
+                                      'W załączniku raport v2 w formacie XLSX.'
+                                      lv_fname_v2
+                                      lt_bin_v2
+                                      p_email.
+
+    " <-- NOWY CASE: Wyślij XLS v2 (kolorowy HTML)
+    WHEN 'ZMAILXLS2'.
+      " Generuj HTML v2
+      DATA lv_html_xls TYPE string.
+      CLEAR lv_html_xls.
+      PERFORM build_html_from_agg_v2 USING gt_agg2 CHANGING lv_html_xls.
+
+      " Dodaj nagłówek HTML (jak w preview)
+      DATA lv_html_full TYPE string.
+      DATA lv_when_xls   TYPE string.
+      DATA lv_author_xls TYPE string.
+      lv_when_xls   = |{ sy-datum DATE = USER } { sy-uzeit TIME = USER }|.
+      lv_author_xls = sy-uname.
+
+      DATA(lv_hdr_xls) =
+        |<div style="margin:8px 0 12px 0;">| &&
+        |<div style="font-size:20px; font-weight:700;">{ lv_full_title } (v2)</div>| &&
+        |<div style="font-size:12px; color:#555;">Generowano: { lv_when_xls } &nbsp;&nbsp; Autor: { lv_author_xls }</div>| &&
+        |</div>|.
+
+      lv_html_full = |<!DOCTYPE html><html><head><meta charset="utf-8"></head>| &&
+                     |<body style="font-family:Segoe UI,Arial; font-size:12px">| &&
+                     lv_hdr_xls &&
+                     lv_html_xls &&
+                     |</body></html>|.
+
+      " Wyślij jako .xls (Excel otworzy z kolorami!)
+      DATA lv_fname_xls TYPE so_obj_des.
+      lv_fname_xls = 'ZST_EXCEL_AGG_v2.xls'.  " ← UWAGA: .xls, nie .xlsx!
+
+      PERFORM send_html_as_xls USING 'Raport Wydajnosci v2 (XLS kolorowy)'
+                                      'W załączniku raport v2 w formacie XLS (z kolorami).'
+                                      lv_fname_xls
+                                      lv_html_full
+                                      p_email.
+
+
+
+  ENDCASE.
+ENDMETHOD.
+
+
+ENDCLASS.
+
+
+
+FORM show_grid USING it_tab TYPE ty_t_agg.
+  IF it_tab IS INITIAL.
+    MESSAGE 'Brak danych do wyświetlenia.' TYPE 'S'. RETURN.
+  ENDIF.
+
+  IF go_grid IS INITIAL.
+    CREATE OBJECT go_grid EXPORTING i_parent = cl_gui_container=>default_screen.
+    CREATE OBJECT go_ev.
+    SET HANDLER go_ev->on_double_click FOR go_grid.
+
+    SET HANDLER go_ev->on_toolbar      FOR go_grid.
+    SET HANDLER go_ev->on_user_command FOR go_grid.
+
+  ENDIF.
+
+  DATA lt_fcat TYPE lvc_t_fcat.
+
+  PERFORM fc_add_fcat USING 'DATA_D'        'Data'                    12 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'ZMIANA'        'Zmiana'                   8 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'LINIA_PLIK'    'Linia (plik)'            22 CHANGING lt_fcat.
+*  PERFORM fc_add_fcat USING 'WYDZIAL'       'Wydział'                 15 CHANGING lt_fcat.  " <-- NOWA LINIA
+  PERFORM fc_add_fcat USING 'NR_ZLECENIA'   'Nr zlecenia'             12 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'MATNR'         'Materiał'                18 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'MAKTX'         'Nazwa materiału'         40 CHANGING lt_fcat.
+
+  " Norma linii - liczba całkowita bez przecinków
+  DATA ls_norma TYPE lvc_s_fcat.
+  CLEAR ls_norma.
+  ls_norma-fieldname = 'NORMA_LINIA'.
+  ls_norma-coltext   = 'Norma linii'.
+  ls_norma-outputlen = 12.
+  ls_norma-datatype  = 'INT4'.              " <-- Typ całkowity
+  ls_norma-no_sign   = abap_true.           " <-- Bez znaku +/-
+  ls_norma-decimals_o = 0.                  " <-- 0 miejsc po przecinku
+  APPEND ls_norma TO lt_fcat.
+
+  PERFORM fc_add_fcat USING 'QTY_SUM'       'Ilość'            16 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'PLAN_SUM_INT'  'Il. oczek.'       12 CHANGING lt_fcat.
+*  PERFORM fc_add_fcat USING 'REC_COUNT'     'Il. rek.'         10 CHANGING lt_fcat.
+*  PERFORM fc_add_fcat USING 'OSOBY_AVG'     'Śr. osób'                 8 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'OSOBY_RZECZ_AVG' 'Śr. osób' 8 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'OSOBY_NORM_AVG' 'Śr. o. norma' 8 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'WYD_WAZ_DISP'  'Wydajność %'    14 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'C_TRWANIA_SUM'   'Czas trwania (min)'    10 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'AWARIE_TXT_SUM' 'Awaria (opis)'       60 CHANGING lt_fcat.  " NOWE
+  PERFORM fc_add_fcat USING 'C_AWARIE_SUM'   'Czas awarii (min)'   12 CHANGING lt_fcat.  " NOWE
+  PERFORM fc_add_fcat USING 'C_PRZEJ_SUM'   'CPrzej (min)'            10 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'C_PRZEZBR_SUM' 'CPrzezbr (min)'          12 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'C_PRZERWY_SUM' 'CPrzerwy (min)'          12 CHANGING lt_fcat.
+  PERFORM fc_add_fcat USING 'C_ORG_SUM'     'COrg (min)'              12 CHANGING lt_fcat.
+
+  " ukryte
+  DATA ls_h TYPE lvc_s_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'WYD_WAZONA'. ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'OSOBY_SUM'.  ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'SORT_TOTAL'. ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'NAZWA_STAN'. ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'PLAN_SUM'.   ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+  CLEAR ls_h. ls_h-fieldname = 'LINIA_BASE'.   ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.  " <-- NOWA LINIA
+  CLEAR ls_h. ls_h-fieldname = 'LINIA_SORT'. ls_h-tech = abap_true. APPEND ls_h TO lt_fcat.
+
+
+LOOP AT lt_fcat ASSIGNING FIELD-SYMBOL(<fc>).
+  CASE <fc>-fieldname.
+    WHEN 'QTY_SUM' OR 'PLAN_SUM_INT' OR 'REC_COUNT'          " <-- ZMIEŃ TUTAJ
+      OR 'OSOBY_AVG' OR 'WYD_WAZ_DISP' OR 'C_AWARIE_SUM'
+      OR 'C_PRZEJ_SUM' OR 'C_PRZEZBR_SUM' OR 'C_PRZERWY_SUM' OR 'C_PRACY_SUM'
+      OR 'C_ORG_SUM' OR 'NORMA_LINIA'.
+      <fc>-just = 'R'.
+    WHEN OTHERS.
+      " tekstowe (np. AWARIE_TXT_SUM) zostają lewe
+  ENDCASE.
+ENDLOOP.
+
+" === WŁĄCZ WORD WRAP dla Nazwa materiału (TEST!) ===
+LOOP AT lt_fcat ASSIGNING <fc> WHERE fieldname = 'MAKTX'.
+  " Word wrap włączony (domyślnie), ale upewnijmy się:
+  <fc>-no_merging = abap_false.   " FALSE = word wrap włączony
+  <fc>-outputlen  = 40.            " Zmniejsz szerokość (tekst się złamie)
+  EXIT.
+ENDLOOP.
+
+" === Usuń zera wiodące z MATNR ===
+LOOP AT lt_fcat ASSIGNING <fc> WHERE fieldname = 'MATNR'.
+  <fc>-edit_mask = '==MATN1'.   " Konwersja wyjściowa (usuwa zera)
+  <fc>-outputlen = 10.           " Zmniejsz szerokość (było 18)
+  EXIT.
+ENDLOOP.
+
+
+  DATA ls_layo TYPE lvc_s_layo.
+  ls_layo-ctab_fname = 'CTAB'.
+  ls_layo-cwidth_opt = abap_true.
+  ls_layo-grid_title = 'Raport Wydajności - Data / Zmiana / Linia (Σ w odpowiedniej kolumnie)'.
+
+  DATA lt_sort TYPE lvc_t_sort.
+  DATA ls_sort TYPE lvc_s_sort.
+  CLEAR ls_sort. ls_sort-fieldname = 'DATA_D'.     ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.
+  CLEAR ls_sort. ls_sort-fieldname = 'ZMIANA'.     ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.
+  CLEAR ls_sort. ls_sort-fieldname = 'LINIA_SORT'. ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.
+  CLEAR ls_sort. ls_sort-fieldname = 'LINIA_BASE'. ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.  " ← ZMIENIONE (było SORT_TOTAL)
+  CLEAR ls_sort. ls_sort-fieldname = 'SORT_TOTAL'. ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.  " ← ZMIENIONE (było WYDZIAL)
+  CLEAR ls_sort. ls_sort-fieldname = 'NAZWA_STAN'. ls_sort-up = abap_true.  APPEND ls_sort TO lt_sort.  " ← BEZ ZMIAN
+
+  go_grid->set_table_for_first_display(
+    EXPORTING is_layout       = ls_layo
+    CHANGING  it_fieldcatalog = lt_fcat
+              it_sort         = lt_sort
+              it_outtab       = it_tab ).
+  go_grid->refresh_table_display( ).
+  WRITE: / space.
+  cl_gui_cfw=>flush( ).
+
+
+ENDFORM.
+
+
+************************************************************************
+* SALV – log błędów
+************************************************************************
+FORM show_alv_err USING it_err TYPE ty_t_rows.
+  IF it_err IS INITIAL.
+    MESSAGE 'Brak rekordów błędnych.' TYPE 'S'. RETURN.
+  ENDIF.
+  DATA lo TYPE REF TO cl_salv_table.
+  cl_salv_table=>factory( IMPORTING r_salv_table = lo CHANGING t_table = it_err ).
+  lo->get_functions( )->set_all( abap_true ).
+  lo->get_display_settings( )->set_list_header( 'Raport Wydajności - log błędów (status)' ).
+  lo->get_display_settings( )->set_striped_pattern( abap_true ).
+  lo->get_columns( )->set_optimize( abap_true ).
+  DATA lc TYPE REF TO cl_salv_columns_table. lc = lo->get_columns( ).
+  lc->get_column( 'COL2' )->set_long_text( 'Data' ).
+  lc->get_column( 'COL6' )->set_long_text( 'Zmiana' ).
+  lc->get_column( 'COL5' )->set_long_text( 'Nr zlecenia (plik)' ).
+  lc->get_column( 'COL10' )->set_long_text( 'Ilość' ).
+  lc->get_column( 'STATUS' )->set_long_text( 'Status błędu/ostrzeżenia' ).
+  lo->display( ).
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* Konwersja czasu z formatu HHMM na minuty
+*---------------------------------------------------------------------*
+FORM hhmm_to_minutes USING iv_hhmm TYPE string
+                   CHANGING cv_minutes TYPE i.
+  DATA: v TYPE string, h TYPE i, m TYPE i.
+  CLEAR cv_minutes.
+  IF iv_hhmm IS INITIAL. RETURN. ENDIF.
+
+  v = iv_hhmm.
+  REPLACE ALL OCCURRENCES OF ':' IN v WITH ''.
+  CONDENSE v NO-GAPS.
+
+  IF strlen( v ) = 4 AND v CO '0123456789'.
+    h = v(2). m = v+2(2).
+    cv_minutes = h * 60 + m.
+  ELSE.
+    " Próba interpretacji jako liczby całkowitej
+    TRY.
+      cv_minutes = CONV i( iv_hhmm ).
+    CATCH cx_sy_conversion_no_number.
+      cv_minutes = 0.
+    ENDTRY.
+  ENDIF.
+ENDFORM.
+
+
+
+************************************************************************
+* ======= FORMy MAILOWE (test RAW / HTML / XLSX) =======================
+************************************************************************
+
+*---------------------------------------------------------------------*
+* Prosta wysyłka e-mail (RAW) - z parametrem adresu
+*---------------------------------------------------------------------*
+FORM send_simple_test_mail USING iv_subj  TYPE so_obj_des
+                                 iv_body  TYPE string
+                                 iv_email TYPE ad_smtpadr.
+
+  DATA: lo_req    TYPE REF TO cl_bcs,
+        lo_doc    TYPE REF TO cl_document_bcs,
+        lt_text   TYPE soli_tab,
+        ls_text   TYPE soli.
+
+  ls_text = iv_body.
+  APPEND ls_text TO lt_text.
+
+  lo_req = cl_bcs=>create_persistent( ).
+  lo_doc = cl_document_bcs=>create_document(
+              i_type    = 'RAW'
+              i_subject = iv_subj
+              i_text    = lt_text ).
+  lo_req->set_document( lo_doc ).
+
+  " Nadawca i odbiorca (adres z parametru)
+  lo_req->set_sender(    cl_cam_address_bcs=>create_internet_address( 'sap.orders@dramers.com.pl' ) ).
+  lo_req->add_recipient( cl_cam_address_bcs=>create_internet_address( iv_email ) ).
+
+  lo_req->send( i_with_error_screen = abap_true ).
+  COMMIT WORK.
+  MESSAGE 'Testowy e-mail został wysłany (SOST).' TYPE 'S'.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* HTML: mała funkcja escapująca
+*---------------------------------------------------------------------*
+FORM html_escape USING    iv_in  TYPE string
+                 CHANGING ev_out TYPE string.
+  ev_out = iv_in.
+  REPLACE ALL OCCURRENCES OF '&' IN ev_out WITH '&amp;'.
+  REPLACE ALL OCCURRENCES OF '<' IN ev_out WITH '&lt;'.
+  REPLACE ALL OCCURRENCES OF '>' IN ev_out WITH '&gt;'.
+ENDFORM.
+
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* Budowa HTML z gt_agg2 (Σ wiersze + kolory % w detalu) – dla P_HTML
+*---------------------------------------------------------------------*
+FORM build_html_from_agg USING    it_tab  TYPE ty_t_agg
+                         CHANGING ev_html TYPE string.
+
+  " 0) Sort jak w ALV (dzień -> zmiana -> sort_total -> stanowisko -> linia)
+  DATA lt TYPE ty_t_agg.
+  lt = it_tab.
+  SORT lt BY data_d ASCENDING
+             zmiana ASCENDING
+             linia_sort ASCENDING
+             linia_base ASCENDING          " <-- ZMIEŃ z linia_plik na linia_base
+             sort_total ASCENDING
+             nazwa_stan ASCENDING.
+
+
+  " 1) Stałe kolorów (HEX) – kompatybilne z Outlookiem
+  CONSTANTS: c_col_hdr  TYPE string VALUE '#f5f5f5',  " nagłówki tabeli
+             c_sum_linia_bg TYPE string VALUE '#d7ebff',  " Σ LINIA (jasny niebieski)     ← ZMIENIONE
+             c_sum_zmiana_bg TYPE string VALUE '#fff9c4', " Σ ZMIANY (żółty)               ← NOWE
+             c_sum_dzien_bg  TYPE string VALUE '#0b4a7a', " Σ DZIEŃ (granat)               ← ZMIENIONE
+             c_sum2_fc  TYPE string VALUE '#ffffff',  " Σ dnia – biała czcionka
+
+             c_poor     TYPE string VALUE '#b71c1c',  " Wyd.% < 85
+             c_poor_det TYPE string VALUE '#b71c1c',  " mocniejszy czerwony TYLKO dla detali
+
+             c_mid      TYPE string VALUE '#fff3cd',  " 85 <= Wyd.% < 95
+             c_good     TYPE string VALUE '#d4edda',  " Wyd.% >= 95
+             c_gray     TYPE string VALUE '#eeeeee',  " brak planu (szary)
+             c_day_border TYPE string VALUE '#000000',  " czarna ramka Σ dnia
+             c_border_black TYPE string VALUE '#000000',  " czarna ramka
+
+             c_cpracy_normal TYPE string VALUE '#d4edda',  " jasnozielony jak good
+             c_cpracy_other  TYPE string VALUE '#ffe0b2'.  " jasny pomarańczowy
+
+  " 2) Nagłówek HTML + tabela (style inline – bez <tr style="...">!)
+  DATA html TYPE string.
+  html &&= |<table style='border-collapse:collapse; width:100%;'>|.
+  html &&= |<thead><tr>|.
+
+  " --- KLUCZ (bez kolumny SORT_TOTAL) ---
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Data</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Zmiana</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Linia (plik)</th>|.
+*  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Wydział</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Stanowisko</th>|.
+
+
+  " --- METRYKI ---
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Ilość</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Il. oczek.</th>|.
+*  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Il. rek.</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Śr. osób</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Nor. osób</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Wydajność %</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Czas trwania (min)</th>|.
+
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr }; white-space:nowrap;' align='left'>Awaria - szczegółowy opis</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Czas awarii (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzej (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzezbr (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzerwy (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>COrg (min)</th>|.
+
+  html &&= |</tr></thead><tbody>|.
+
+  " 3) Wiersze
+FIELD-SYMBOLS <r> TYPE ty_agg.
+LOOP AT lt ASSIGNING <r>.
+
+  " Bazowe style komórek
+  DATA cell_l TYPE string.
+  DATA cell_r TYPE string.
+  DATA cell_wrap TYPE string.
+
+  cell_l = |border:1px solid #ddd; padding:4px; white-space:nowrap;|.
+  cell_r = cell_l && | text-align:right;|.
+  cell_wrap = |border:1px solid #ddd; padding:4px; white-space:normal; | &&
+              |overflow-wrap:anywhere; word-break:break-word; vertical-align:top;|.
+
+  " Style wynikowe per komórka
+  DATA td_l TYPE string VALUE ''.
+  DATA td_r TYPE string VALUE ''.
+  DATA td_w TYPE string VALUE ''.
+  DATA td_wrap TYPE string VALUE ''.
+
+  " Styl do kolorowania CPracy (min) - deklaracja raz na pętlę
+  DATA cpracy_style TYPE string VALUE ''.
+
+  IF <r>-is_total = abap_true.
+    " ===== SUMY =====
+    DATA bg        TYPE string.
+    DATA font_row  TYPE string.
+    DATA font_w    TYPE string.
+    DATA perf_sum  TYPE string.
+    DATA p_sum     TYPE decfloat34.
+    DATA borders   TYPE string VALUE ''.
+
+    DATA border_top TYPE string VALUE 'border-top:2px solid #0b4a7a;'.
+    DATA border_bot TYPE string VALUE 'border-bottom:2px solid #0b4a7a;'.
+
+    IF <r>-total_lvl = 3.                                                " ← NOWE (Σ LINIA)
+      CONCATENATE 'background:' c_sum_linia_bg ';' INTO bg.             " ← niebieski
+      font_row = 'font-weight:700.'.
+      DATA btop3 TYPE string.
+      DATA bbot3 TYPE string.
+      btop3 = |border-top:1px solid { c_border_black };|.
+      bbot3 = |border-bottom:1px solid { c_border_black };|.
+      CONCATENATE btop3 bbot3 INTO borders.
+    ELSEIF <r>-total_lvl = 2.                                           " ← Σ ZMIANY
+      CONCATENATE 'background:' c_sum_zmiana_bg ';' INTO bg.            " ← ZMIENIONE na ŻÓŁTY
+      font_row = 'font-weight:700.'.                                    " ← ZMIENIONE (grubsza czcionka)
+      DATA btop2 TYPE string.
+      DATA bbot2 TYPE string.
+      btop2 = |border-top:2px solid { c_border_black };|.
+      bbot2 = |border-bottom:2px solid { c_border_black };|.
+      CONCATENATE btop2 bbot2 INTO borders.
+    ELSEIF <r>-total_lvl = 1.                                           " ← Σ DZIEŃ
+      CONCATENATE 'background:' c_sum_dzien_bg ';' INTO bg.             " ← granat
+      CONCATENATE 'color:' c_sum2_fc ';font-weight:700;' INTO font_row.
+      CONCATENATE border_top border_bot INTO borders.
+    ENDIF.
+
+    td_l    = cell_l    && ' ' && bg && font_row && ' ' && borders.
+    td_r    = cell_r    && ' ' && bg && font_row && ' ' && borders.
+    td_wrap = cell_wrap && ' ' && bg && font_row && ' ' && borders.
+
+    DATA fc TYPE string.
+    IF <r>-plan_sum = 0.
+      CONCATENATE 'background:' c_gray ';' INTO perf_sum.
+      fc = 'color:#000000;'.
+    ELSE.
+      p_sum = <r>-wyd_wazona.
+      IF p_sum < 85.
+        CONCATENATE 'background:' c_poor ';' INTO perf_sum.
+        fc = 'color:#ffffff;'.
+      ELSEIF p_sum < 95.
+        CONCATENATE 'background:' c_mid ';' INTO perf_sum.
+        fc = 'color:#000000;'.
+      ELSE.
+        CONCATENATE 'background:' c_good ';' INTO perf_sum.
+        fc = 'color:#000000;'.
+      ENDIF.
+    ENDIF.
+
+    font_w = 'font-weight:700; ' && fc.
+    td_w   = cell_r && ' ' && perf_sum && font_w && ' ' && borders.
+
+    " Render SUMY
+    html = html && '<tr>' &&
+           |<td style="{ td_l }">{ <r>-data_d }</td>| &&
+           |<td style="{ td_l }">{ <r>-zmiana }</td>| &&
+           |<td style="{ td_l }">{ <r>-linia_plik }</td>| &&
+*           |<td style="{ td_l }">{ <r>-wydzial }</td>| &&
+           |<td style="{ td_l }">{ <r>-nazwa_stan }</td>| &&
+           |<td style="{ td_r }">{ <r>-qty_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+           |<td style="{ td_r }">{ <r>-plan_sum NUMBER = USER DECIMALS = 0 } </td>| &&
+           |<td style="{ td_r }">{ <r>-osoby_rzecz_avg }</td>| &&
+           |<td style="{ td_r }">{ <r>-osoby_norm_avg }</td>| &&
+           |<td style="{ td_w }">{ <r>-wyd_waz_disp }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_trwania_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+           |<td style="{ td_wrap }"></td>| &&
+           |<td style="{ td_r }">{ <r>-c_awarie_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przej_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przezbr_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przerwy_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_org_sum }</td>| &&
+           |</tr>|.
+
+  ELSE.
+    " ===== DETALE =====
+    td_l = cell_l.
+    td_r = cell_r.
+    td_wrap = cell_wrap.
+
+    DATA perf TYPE string.
+    DATA p    TYPE decfloat34.
+    CLEAR perf.
+    IF <r>-plan_sum = 0.
+      perf = 'background:' && c_gray && '; font-weight:700;'.
+    ELSE.
+      p = <r>-wyd_wazona.
+      IF p < 85.
+        perf = 'background:' && c_poor && '; color:#ffffff; font-weight:700;'.
+      ELSEIF p < 95.
+        perf = 'background:' && c_mid  && '; font-weight:700;'.
+      ELSE.
+        perf = 'background:' && c_good && '; font-weight:700;'.
+      ENDIF.
+    ENDIF.
+    td_w = cell_r && ' ' && perf.
+
+" --- Kolorowanie komórki Czas trwania (min) tylko dla detali ---
+IF <r>-c_trwania_sum = 480.
+  cpracy_style = |background:{ c_cpracy_normal }; font-weight:700;|.
+ELSE.
+  cpracy_style = |background:{ c_cpracy_other }; font-weight:700;|.
+ENDIF.
+
+    DATA s_qty  TYPE string.
+    DATA s_plan TYPE string.
+    s_qty  = |{ <r>-qty_sum  NUMBER = USER DECIMALS = 0 }|.
+    s_plan = |{ <r>-plan_sum NUMBER = USER DECIMALS = 0 }|.
+
+    DATA desc TYPE string.
+    desc = <r>-awarie_txt_sum.
+    PERFORM html_escape USING desc CHANGING desc.
+
+    " Render DETAL
+    html = html && '<tr>' &&
+           |<td style="{ td_l }">{ <r>-data_d }</td>| &&
+           |<td style="{ td_l }">{ <r>-zmiana }</td>| &&
+           |<td style="{ td_l }">{ <r>-linia_plik }</td>| &&
+*           |<td style="{ td_l }">{ <r>-wydzial }</td>| &&
+           |<td style="{ td_l }">{ <r>-nazwa_stan }</td>| &&
+           |<td style="{ td_r }">{ s_qty }</td>| &&
+           |<td style="{ td_r }">{ s_plan }</td>| &&
+           |<td style="{ td_r }">{ <r>-osoby_rzecz_avg }</td>| &&
+           |<td style="{ td_r }">{ <r>-osoby_norm_avg }</td>| &&
+           |<td style="{ td_w }">{ <r>-wyd_waz_disp }</td>| &&
+           |<td style="{ td_r } { cpracy_style }">{ <r>-c_trwania_sum }</td>| &&
+           |<td style="{ td_wrap }">{ desc }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_awarie_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przej_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przezbr_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_przerwy_sum }</td>| &&
+           |<td style="{ td_r }">{ <r>-c_org_sum }</td>| &&
+           |</tr>|.
+
+  ENDIF.
+ENDLOOP.
+
+  " 4) Zakończenie HTML
+  ev_html = html && '</tbody></table>'.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* Podgląd HTML lokalnie w przeglądarce (bez wysyłki maila)
+*---------------------------------------------------------------------*
+FORM preview_html USING iv_title TYPE string iv_pref TYPE string.
+
+  DATA: lv_html     TYPE string,   " tabela zbudowana przez BUILD_HTML_FROM_AGG
+        lv_all      TYPE string,   " pełen dokument HTML
+        lv_tempdir  TYPE string,
+        lv_file     TYPE string,
+        lv_exists   TYPE abap_bool,
+        lv_rc       TYPE i.        " RC dla DIRECTORY_CREATE
+
+  " 1) Zbuduj HTML (tabelę) z agregatu
+  PERFORM build_html_from_agg USING    gt_agg2
+                              CHANGING lv_html.
+
+  " --- Nagłówek raportu (tytuł + data/godzina + autor)
+
+  DATA lv_when   TYPE string.
+  DATA lv_author TYPE string.
+  lv_when   = |{ sy-datum DATE = USER } { sy-uzeit TIME = USER }|.
+  lv_author = sy-uname.
+
+
+
+
+
+
+  DATA(lv_hdr) =
+    |<div style="margin:8px 0 12px 0;">| &&
+    |<div style="font-size:20px; font-weight:700;">{ iv_title }</div>| &&
+    |<div style="font-size:12px; color:#555;">Generowano: { lv_when } &nbsp;&nbsp; Autor: { lv_author }</div>| &&
+    |</div>|.
+
+  " 2) Złóż kompletny dokument HTML (UTF-8)
+  lv_all = |<!DOCTYPE html><html><head><meta charset="utf-8"></head>| &&
+           |<body style="font-family:Segoe UI,Arial; font-size:12px">| &&
+           lv_hdr &&
+           |<p>| && iv_pref && |</p>| &&
+           lv_html &&
+           |</body></html>|.
+
+  " 3) Katalog tymczasowy na froncie
+  cl_gui_frontend_services=>get_temp_directory(
+    CHANGING  temp_dir = lv_tempdir
+    EXCEPTIONS cntl_error           = 1
+               error_no_gui         = 2
+               not_supported_by_gui = 3
+               OTHERS               = 4 ).
+  IF sy-subrc <> 0 OR lv_tempdir IS INITIAL.
+    lv_tempdir = 'C:\Temp'.
+  ENDIF.
+
+  " 4) Upewnij się, że katalog istnieje
+  cl_gui_frontend_services=>directory_exist(
+    EXPORTING directory = lv_tempdir
+    RECEIVING result    = lv_exists
+    EXCEPTIONS OTHERS   = 1 ).
+  IF lv_exists <> abap_true.
+    cl_gui_frontend_services=>directory_create(
+      EXPORTING directory = lv_tempdir
+      CHANGING  rc        = lv_rc
+      EXCEPTIONS OTHERS   = 1 ).
+  ENDIF.
+
+  " 5) Nazwa pliku
+  CONCATENATE lv_tempdir '\ZST_EXCEL_AGG_preview.html' INTO lv_file.
+
+  " 6) Zapis w UTF-8 jako BIN (bez limitu 255 znaków)
+  DATA lx      TYPE xstring.
+  DATA lt_bin  TYPE solix_tab.
+  DATA lv_xlen TYPE i.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING
+      text     = lv_all
+      encoding = '4110'        " UTF-8 (SAP codepage)
+    IMPORTING
+      buffer   = lx.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer        = lx
+    IMPORTING
+      output_length = lv_xlen
+    TABLES
+      binary_tab    = lt_bin.
+
+  CALL FUNCTION 'GUI_DOWNLOAD'
+    EXPORTING
+      filename     = lv_file
+      filetype     = 'BIN'
+      bin_filesize = lv_xlen
+    TABLES
+      data_tab     = lt_bin
+    EXCEPTIONS
+      file_write_error        = 1
+      no_batch                = 2
+      gui_refuse_filetransfer = 3
+      invalid_type            = 4
+      no_authority            = 5
+      unknown_error           = 6
+      bad_data_format         = 7
+      header_not_allowed      = 8
+      separator_not_allowed   = 9
+      OTHERS                  = 10.
+  IF sy-subrc <> 0.
+    MESSAGE |Nie udało się zapisać pliku: { lv_file }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  " 7) Otwórz w przeglądarce
+  cl_gui_frontend_services=>execute(
+    EXPORTING
+      document  = lv_file
+      operation = 'OPEN'
+    EXCEPTIONS
+      cntl_error           = 1
+      error_no_gui         = 2
+      not_supported_by_gui = 3
+      OTHERS               = 4 ).
+
+  IF sy-subrc = 0.
+    MESSAGE |Podgląd zapisany i otwarty: { lv_file }| TYPE 'S'.
+  ELSE.
+    MESSAGE |Zapisano: { lv_file }, ale nie udało się otworzyć.| TYPE 'I'.
+  ENDIF.
+
+ENDFORM.
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* Wysyłka HTML w treści – identyczny HTML jak w PREVIEW (bez BAPI)
+*---------------------------------------------------------------------*
+FORM send_html_simple USING iv_subj  TYPE so_obj_des
+                             iv_pref  TYPE string
+                             iv_html  TYPE string
+                             iv_email TYPE ad_smtpadr.
+
+  DATA: lo_req  TYPE REF TO cl_bcs,
+        lo_doc  TYPE REF TO cl_document_bcs,
+        lt_soli TYPE soli_tab,
+        lv_all  TYPE string.
+
+  "=== Nagłówek jak w PREVIEW (bez BAPI/RETURN) =======================
+  DATA lv_title  TYPE string VALUE 'RAPORT WYDAJNOŚCI'.
+  DATA lv_when   TYPE string.
+  DATA lv_author TYPE string.
+  lv_when   = |{ sy-datum DATE = USER } { sy-uzeit TIME = USER }|.
+  lv_author = sy-uname.
+
+  DATA(lv_hdr) =
+  |<div style="margin:8px 0 12px 0;">| &&
+  |<div style="font-size:20px; font-weight:700;">{ iv_subj }</div>| &&
+  |<div style="font-size:12px; color:#555;">Generowano: { lv_when } &nbsp;&nbsp; Autor: { lv_author }</div>| &&
+  |</div>|.
+
+  "=== Pełny dokument HTML (jak PREVIEW) ===============================
+  lv_all = |<!DOCTYPE html><html><head><meta charset="utf-8"></head>| &&
+           |<body style="font-family:Segoe UI,Arial; font-size:12px">| &&
+           lv_hdr &&
+           |<p>| && iv_pref && |</p>| &&
+           iv_html &&
+           |</body></html>|.
+
+  "=== Konwersja na SOLI (≤ 255 znaków/linia) =========================
+  CLEAR lt_soli.
+  DATA(off) = 0.
+  WHILE off < strlen( lv_all ).
+    DATA(len) = 255.
+    IF off + len > strlen( lv_all ).
+      len = strlen( lv_all ) - off.
+    ENDIF.
+    APPEND lv_all+off(len) TO lt_soli.
+    off = off + len.
+  ENDWHILE.
+
+  "=== Budowa i wysyłka (HTML jako treść wiadomości) ==================
+  TRY.
+      lo_req = cl_bcs=>create_persistent( ).
+
+      lo_doc = cl_document_bcs=>create_document(
+                  i_type    = 'HTM'
+                  i_subject = iv_subj
+                  i_text    = lt_soli ).
+      lo_req->set_document( lo_doc ).
+
+      " Nadawca i odbiorca
+      lo_req->set_sender(    cl_cam_address_bcs=>create_internet_address( 'sap.orders@dramers.com.pl' ) ).
+      lo_req->add_recipient( cl_cam_address_bcs=>create_internet_address( iv_email ) ).
+
+      lo_req->send( i_with_error_screen = abap_true ).
+      COMMIT WORK.
+
+      MESSAGE |HTML wysłany na: { iv_email }| TYPE 'S'.
+
+    CATCH cx_send_req_bcs INTO DATA(lx_send).
+      MESSAGE lx_send->get_text( ) TYPE 'E'.
+    CATCH cx_address_bcs INTO DATA(lx_addr).
+      MESSAGE lx_addr->get_text( ) TYPE 'E'.
+    CATCH cx_document_bcs INTO DATA(lx_doc).
+      MESSAGE lx_doc->get_text( ) TYPE 'E'.
+  ENDTRY.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* SALV -> XLSX -> SOLIX_TAB
+*---------------------------------------------------------------------*
+FORM build_xlsx_from_tab USING    it_any     TYPE STANDARD TABLE
+                         CHANGING ev_xlsx    TYPE xstring
+                                  et_bin     TYPE solix_tab
+                                  ev_xlen    TYPE int4
+                                  ev_size    TYPE so_obj_len.
+  DATA lo_salv TYPE REF TO cl_salv_table.
+  FIELD-SYMBOLS <tab> TYPE STANDARD TABLE.
+  ASSIGN it_any TO <tab>.
+  CLEAR: ev_xlsx, et_bin, ev_xlen, ev_size.
+  IF <tab> IS INITIAL. RETURN. ENDIF.
+
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING r_salv_table = lo_salv
+        CHANGING  t_table      = <tab> ).
+
+"=== Tytuł listy (pierwszy wiersz w XLSX) ===
+lo_salv->get_display_settings( )->set_list_header(
+  'Raport Wydajności – Data / Zmiana / Linia' ).
+
+"=== Kolumny: nagłówki, kolejność, wyrównanie ===
+DATA(lo_cols) = lo_salv->get_columns( ).
+lo_cols->set_optimize( abap_true ).
+
+" Ukryj pola techniczne, żeby nie wchodziły do XLSX
+PERFORM hide_col USING 'WYD_WAZONA' lo_cols.
+PERFORM hide_col USING 'OSOBY_SUM'  lo_cols.
+PERFORM hide_col USING 'SORT_TOTAL' lo_cols.
+" NAZWA_STAN zostaje (potrzebna w XLSX)
+
+DATA pos TYPE i.
+pos = 1.
+
+" --- KLUCZ (lewe wyrównanie) ---
+PERFORM set_col USING lo_cols 'DATA_D'        pos 'Data'         'L'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'ZMIANA'        pos 'Zmiana'       'L'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'LINIA_PLIK'    pos 'Linia (plik)' 'L'.
+pos = pos + 1.
+  PERFORM set_col USING lo_cols 'WYDZIAL'       pos 'Wydział'      'L'.  " <-- NOWA LINIA
+  pos = pos + 1.
+
+PERFORM set_col USING lo_cols 'NAZWA_STAN'    pos 'Stanowisko'   'L'.
+
+" --- METRYKI (prawe wyrównanie) ---
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'QTY_SUM'       pos 'Ilość'               'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'PLAN_SUM'      pos 'Il. oczek.'        'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'REC_COUNT'     pos 'Il. rek.'            'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'OSOBY_AVG'     pos 'Śr. osób'                   'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'OSOBY_NORM_AVG' pos 'Nor. osób'     'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'WYD_WAZ_DISP'  pos 'Wydajność %'       'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_TRWANIA_SUM'   pos 'Czas trwania (min)'       'R'.
+
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'AWARIE_TXT_SUM' pos 'Awaria (opis)'     'L'.   " NOWE
+
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_AWARIE_SUM'   pos 'Czas awarii (min)' 'R'.   " NOWE
+
+
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_PRZEJ_SUM'   pos 'CPrzej (min)'               'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_PRZEZBR_SUM' pos 'CPrzezbr (min)'             'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_PRZERWY_SUM' pos 'CPrzerwy (min)'             'R'.
+pos = pos + 1.
+PERFORM set_col USING lo_cols 'C_ORG_SUM'     pos 'COrg (min)'                 'R'.
+
+
+"=== Generacja XLSX z ustawieniami ===
+ev_xlsx = lo_salv->to_xml( if_salv_bs_xml=>c_type_xlsx ).
+
+
+    CATCH cx_salv_msg.
+      RETURN.
+  ENDTRY.
+
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING buffer        = ev_xlsx
+    IMPORTING output_length = ev_xlen
+    TABLES    binary_tab    = et_bin.
+  ev_size = ev_xlen.
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* Przygotuj dane do XLSX - obetnij długie teksty
+*---------------------------------------------------------------------*
+FORM prepare_data_for_xlsx CHANGING ct_data TYPE ty_t_agg.
+  FIELD-SYMBOLS <r> TYPE ty_agg.
+
+  LOOP AT ct_data ASSIGNING <r>.
+    " Ogranicz długość opisu awarii do 255 znaków (limit Excel)
+    IF strlen( <r>-awarie_txt_sum ) > 255.
+      <r>-awarie_txt_sum = <r>-awarie_txt_sum(252) && '...'.
+    ENDIF.
+
+    " Usuń znaki niedozwolone w XML (opcjonalnie)
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline     IN <r>-awarie_txt_sum WITH ' '.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf       IN <r>-awarie_txt_sum WITH ' '.
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>horizontal_tab IN <r>-awarie_txt_sum WITH ' '.
+  ENDLOOP.
+ENDFORM.
+
+
+
+
+
+*---------------------------------------------------------------------*
+* SALV -> XLSX v2 -> SOLIX_TAB (z materiałem, nazwą, zleceniem)
+*---------------------------------------------------------------------*
+FORM build_xlsx_from_tab_v2 USING    it_any     TYPE STANDARD TABLE
+                            CHANGING ev_xlsx    TYPE xstring
+                                     et_bin     TYPE solix_tab
+                                     ev_xlen    TYPE int4
+                                     ev_size    TYPE so_obj_len.
+  DATA lo_salv TYPE REF TO cl_salv_table.
+  FIELD-SYMBOLS <tab> TYPE STANDARD TABLE.
+  ASSIGN it_any TO <tab>.
+  CLEAR: ev_xlsx, et_bin, ev_xlen, ev_size.
+  IF <tab> IS INITIAL. RETURN. ENDIF.
+
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING r_salv_table = lo_salv
+        CHANGING  t_table      = <tab> ).
+
+      " === Tytuł listy (pierwszy wiersz w XLSX) ===
+      lo_salv->get_display_settings( )->set_list_header(
+        'Raport Wydajności v2 – Data / Zmiana / Linia / Materiał' ).
+
+      " === Kolumny: nagłówki, kolejność, wyrównanie ===
+      DATA(lo_cols) = lo_salv->get_columns( ).
+      lo_cols->set_optimize( abap_true ).
+
+      " Ukryj pola techniczne
+      PERFORM hide_col USING 'WYD_WAZONA' lo_cols.
+      PERFORM hide_col USING 'OSOBY_SUM'  lo_cols.
+      PERFORM hide_col USING 'SORT_TOTAL' lo_cols.
+      PERFORM hide_col USING 'LINIA_BASE' lo_cols.
+      PERFORM hide_col USING 'LINIA_SORT' lo_cols.
+      PERFORM hide_col USING 'PLAN_SUM'   lo_cols.
+
+            " === NOWE: Ogranicz długość kolumny Awaria (opis) ===
+      DATA lo_col_awarie TYPE REF TO cl_salv_column.
+      TRY.
+          lo_col_awarie = lo_cols->get_column( 'AWARIE_TXT_SUM' ).
+          lo_col_awarie->set_output_length( 255 ).
+        CATCH cx_salv_not_found.
+      ENDTRY.
+      " === KONIEC NOWEGO ===
+
+      DATA pos TYPE i.
+      pos = 1.
+
+      " --- KLUCZ (lewe wyrównanie) ---
+      PERFORM set_col USING lo_cols 'DATA_D'      pos 'Data'         'L'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'ZMIANA'      pos 'Zmiana'       'L'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'LINIA_PLIK'  pos 'Linia (plik)' 'L'.
+      pos = pos + 1.
+
+      " --- NOWE KOLUMNY v2 (lewe wyrównanie) ---
+      PERFORM set_col USING lo_cols 'NR_ZLECENIA' pos 'Nr zlecenia'  'L'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'MATNR'       pos 'Materiał'     'L'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'MAKTX'       pos 'Nazwa materiału' 'L'.
+      pos = pos + 1.
+
+      " --- METRYKI (prawe wyrównanie) ---
+      PERFORM set_col USING lo_cols 'QTY_SUM'       pos 'Ilość'              'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'PLAN_SUM_INT'  pos 'Il. oczek.'         'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'OSOBY_RZECZ_AVG' pos 'Śr. osób'         'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'OSOBY_NORM_AVG' pos 'Nor. osób'         'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'WYD_WAZ_DISP'  pos 'Wydajność %'        'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_TRWANIA_SUM' pos 'Czas trwania (min)' 'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'AWARIE_TXT_SUM' pos 'Awaria (opis)'     'L'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_AWARIE_SUM'  pos 'Czas awarii (min)'  'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_PRZEJ_SUM'   pos 'CPrzej (min)'       'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_PRZEZBR_SUM' pos 'CPrzezbr (min)'     'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_PRZERWY_SUM' pos 'CPrzerwy (min)'     'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'C_ORG_SUM'     pos 'COrg (min)'         'R'.
+      pos = pos + 1.
+      PERFORM set_col USING lo_cols 'NAZWA_STAN'    pos 'Stanowisko'         'L'.
+
+      " === Generacja XLSX z ustawieniami ===
+      TRY.
+          ev_xlsx = lo_salv->to_xml( if_salv_bs_xml=>c_type_xlsx ).
+        CATCH cx_salv_error INTO DATA(lx_salv).
+          " Jeśli wystąpi błąd generowania, spróbuj CSV zamiast XLSX
+          MESSAGE |Błąd generowania XLSX: { lx_salv->get_text( ) }| TYPE 'W'.
+          RETURN.
+      ENDTRY.
+
+    CATCH cx_salv_msg.
+      RETURN.
+  ENDTRY.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING buffer        = ev_xlsx
+    IMPORTING output_length = ev_xlen
+    TABLES    binary_tab    = et_bin.
+  ev_size = ev_xlen.
+ENDFORM.
+
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* Ukryj kolumnę w SALV, jeśli istnieje
+*---------------------------------------------------------------------*
+FORM hide_col USING iv_name TYPE lvc_fname
+                    io_cols TYPE REF TO cl_salv_columns_table.
+
+  DATA lo_col TYPE REF TO cl_salv_column.
+
+  TRY.
+      lo_col = io_cols->get_column( iv_name ).
+      lo_col->set_visible( abap_false ).
+    CATCH cx_salv_not_found.
+      " Kolumna nie istnieje w tabeli — pomijamy bez błędu
+  ENDTRY.
+
+ENDFORM.
+
+
+
+FORM set_col USING
+      io_cols  TYPE REF TO cl_salv_columns_table
+      iv_name  TYPE lvc_fname
+      iv_pos   TYPE i
+      iv_text  TYPE string          " dowolny tekst – przekonwertujemy
+      iv_align TYPE ty_align.       " 'L'|'C'|'R' lub space = bez zmiany
+
+  DATA lo_col_gen TYPE REF TO cl_salv_column.
+  DATA lo_col_tab TYPE REF TO cl_salv_column_table.
+
+  " Teksty w typach zgodnych z metodami SALV
+  DATA lv_s TYPE scrtext_s.
+  DATA lv_m TYPE scrtext_m.
+  DATA lv_l TYPE scrtext_l.
+
+  TRY.
+      lo_col_gen = io_cols->get_column( iv_name ).
+      lo_col_tab ?= lo_col_gen.              " downcast do wersji 'table'
+
+      " --- Teksty nagłówka ---
+      lv_s = iv_text.
+      lv_m = iv_text.
+      lv_l = iv_text.
+      IF lo_col_tab IS BOUND.
+        lo_col_tab->set_short_text(  lv_s ).
+        lo_col_tab->set_medium_text( lv_m ).
+        lo_col_tab->set_long_text(   lv_l ).
+      ENDIF.
+
+      " --- Pozycja kolumny (użyj API na zbiorze kolumn) ---
+      IF iv_pos > 0.
+        io_cols->set_column_position(
+          columnname = iv_name
+          position   = iv_pos ).
+      ENDIF.
+
+      " --- Wyrównanie ---
+      IF iv_align IS NOT INITIAL.
+        DATA lv_salv_align TYPE i.
+        CASE iv_align.
+          WHEN 'L'. lv_salv_align = if_salv_c_alignment=>left.
+          WHEN 'C'. lv_salv_align = if_salv_c_alignment=>centered. " w Twoim systemie: CENTERED
+          WHEN 'R'. lv_salv_align = if_salv_c_alignment=>right.
+        ENDCASE.
+        IF lv_salv_align IS NOT INITIAL.
+          lo_col_gen->set_alignment( lv_salv_align ).
+        ENDIF.
+      ENDIF.
+
+    CATCH cx_salv_not_found.
+      " brak kolumny – pomiń
+  ENDTRY.
+ENDFORM.
+
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* Prosta wysyłka XLSX (załącznik) - z parametrem adresu
+*---------------------------------------------------------------------*
+FORM send_xlsx_simple USING    iv_subj  TYPE so_obj_des
+                               iv_body  TYPE string
+                               iv_fname TYPE so_obj_des
+                               it_bin   TYPE solix_tab
+                               iv_email TYPE ad_smtpadr.
+  DATA: lo_req    TYPE REF TO cl_bcs,
+        lo_doc    TYPE REF TO cl_document_bcs,
+        lt_text   TYPE soli_tab,
+        ls_text   TYPE soli.
+
+  IF it_bin IS INITIAL.
+    MESSAGE 'Brak danych do załącznika – wysyłka pominięta.' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+  ls_text = iv_body.
+  APPEND ls_text TO lt_text.
+
+  lo_req = cl_bcs=>create_persistent( ).
+  lo_doc = cl_document_bcs=>create_document(
+             i_type    = 'RAW'
+             i_subject = iv_subj
+             i_text    = lt_text ).
+  lo_req->set_document( lo_doc ).
+
+  lo_doc->add_attachment(
+    i_attachment_type    = 'BIN'
+    i_attachment_subject = iv_fname
+    i_att_content_hex    = it_bin ).
+
+  lo_req->set_sender(    cl_cam_address_bcs=>create_internet_address( 'sap.orders@dramers.com.pl' ) ).
+  lo_req->add_recipient( cl_cam_address_bcs=>create_internet_address( iv_email ) ).
+
+  lo_req->send( i_with_error_screen = abap_true ).
+  COMMIT WORK.
+  MESSAGE 'XLSX wysłany (SOST).' TYPE 'S'.
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* Wysyłka HTML jako .xls (Excel otworzy z kolorami!)
+*---------------------------------------------------------------------*
+FORM send_html_as_xls USING    iv_subj  TYPE so_obj_des
+                               iv_body  TYPE string
+                               iv_fname TYPE so_obj_des
+                               iv_html  TYPE string
+                               iv_email TYPE ad_smtpadr.
+  DATA: lo_req    TYPE REF TO cl_bcs,
+        lo_doc    TYPE REF TO cl_document_bcs,
+        lt_text   TYPE soli_tab,
+        ls_text   TYPE soli.
+
+  IF iv_html IS INITIAL.
+    MESSAGE 'Brak danych HTML – wysyłka pominięta.' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+  " Treść wiadomości (prosty tekst)
+  ls_text = iv_body.
+  APPEND ls_text TO lt_text.
+
+  " === KONWERSJA HTML → XSTRING → BINARY ===
+  DATA lv_xstr TYPE xstring.
+  DATA lt_bin  TYPE solix_tab.
+  DATA lv_xlen TYPE int4.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING text     = iv_html
+              encoding = '4110'        " UTF-8
+    IMPORTING buffer   = lv_xstr.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING buffer        = lv_xstr
+    IMPORTING output_length = lv_xlen
+    TABLES    binary_tab    = lt_bin.
+  " === KONIEC KONWERSJI ===
+
+  " Budowa maila
+  lo_req = cl_bcs=>create_persistent( ).
+  lo_doc = cl_document_bcs=>create_document(
+             i_type    = 'RAW'
+             i_subject = iv_subj
+             i_text    = lt_text ).
+  lo_req->set_document( lo_doc ).
+
+  " Dodaj HTML jako załącznik BINARNY .xls (Excel otworzy z kolorami!)
+  lo_doc->add_attachment(
+    i_attachment_type    = 'BIN'                " ← KLUCZOWA ZMIANA!
+    i_attachment_subject = iv_fname
+    i_att_content_hex    = lt_bin ).            " ← Dane binarne zamiast tekstowe
+
+  lo_req->set_sender(    cl_cam_address_bcs=>create_internet_address( 'sap.orders@dramers.com.pl' ) ).
+  lo_req->add_recipient( cl_cam_address_bcs=>create_internet_address( iv_email ) ).
+
+  lo_req->send( i_with_error_screen = abap_true ).
+  COMMIT WORK.
+  MESSAGE |HTML jako XLS wysłany na: { iv_email }| TYPE 'S'.
+ENDFORM.
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* Określenie wydziału na podstawie nazwy pliku
+*---------------------------------------------------------------------*
+FORM determine_wydzial USING    iv_path    TYPE string
+                       CHANGING cv_wydzial TYPE char15.
+
+  DATA(f) = iv_path.
+  TRANSLATE f TO LOWER CASE.
+
+  CLEAR cv_wydzial.
+
+  IF      f CS 'kostk'.
+    cv_wydzial = 'KOSTKA'.
+  ELSEIF f CS 'aerozol'.
+    cv_wydzial = 'AEROZOLE'.
+  ELSEIF f CS 'konfekc'.
+    cv_wydzial = 'KONFEKCJA'.
+  ELSEIF f CS 'wtryskownia'.
+    cv_wydzial = 'WTRYSK'.
+  ELSEIF f CS 'blacharn'.
+    cv_wydzial = 'BLACHARNIA'.
+  ELSE.
+    cv_wydzial = 'NIEZNANY'.
+  ENDIF.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* Podgląd HTML v2 - z materiałem, nazwą i zleceniem
+*---------------------------------------------------------------------*
+FORM preview_html_v2 USING iv_title TYPE string iv_pref TYPE string.
+
+  DATA: lv_html     TYPE string,
+        lv_all      TYPE string,
+        lv_tempdir  TYPE string,
+        lv_file     TYPE string,
+        lv_exists   TYPE abap_bool,
+        lv_rc       TYPE i.
+
+  " 1) Zbuduj HTML v2
+  PERFORM build_html_from_agg_v2 USING gt_agg2 CHANGING lv_html.
+
+  " 2) Nagłówek
+  DATA lv_when   TYPE string.
+  DATA lv_author TYPE string.
+  lv_when   = |{ sy-datum DATE = USER } { sy-uzeit TIME = USER }|.
+  lv_author = sy-uname.
+
+  DATA(lv_hdr) =
+    |<div style="margin:8px 0 12px 0;">| &&
+    |<div style="font-size:20px; font-weight:700;">{ iv_title } (wersja v2)</div>| &&
+    |<div style="font-size:12px; color:#555;">Generowano: { lv_when } &nbsp;&nbsp; Autor: { lv_author }</div>| &&
+    |</div>|.
+
+  " 3) Kompletny dokument
+  lv_all = |<!DOCTYPE html><html><head><meta charset="utf-8"></head>| &&
+           |<body style="font-family:Segoe UI,Arial; font-size:12px">| &&
+           lv_hdr &&
+           |<p>| && iv_pref && |</p>| &&
+           lv_html &&
+           |</body></html>|.
+
+  " 4) Katalog tymczasowy
+  cl_gui_frontend_services=>get_temp_directory(
+    CHANGING  temp_dir = lv_tempdir
+    EXCEPTIONS OTHERS  = 1 ).
+  IF sy-subrc <> 0 OR lv_tempdir IS INITIAL.
+    lv_tempdir = 'C:\Temp'.
+  ENDIF.
+
+  " 5) Upewnij się, że katalog istnieje
+  cl_gui_frontend_services=>directory_exist(
+    EXPORTING directory = lv_tempdir
+    RECEIVING result    = lv_exists
+    EXCEPTIONS OTHERS   = 1 ).
+  IF lv_exists <> abap_true.
+    cl_gui_frontend_services=>directory_create(
+      EXPORTING directory = lv_tempdir
+      CHANGING  rc        = lv_rc
+      EXCEPTIONS OTHERS   = 1 ).
+  ENDIF.
+
+  " 6) Nazwa pliku
+  CONCATENATE lv_tempdir '\ZST_EXCEL_AGG_preview_v2.html' INTO lv_file.
+
+  " 7) Zapis w UTF-8
+  DATA lx      TYPE xstring.
+  DATA lt_bin  TYPE solix_tab.
+  DATA lv_xlen TYPE i.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING text     = lv_all
+              encoding = '4110'
+    IMPORTING buffer   = lx.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING buffer        = lx
+    IMPORTING output_length = lv_xlen
+    TABLES    binary_tab    = lt_bin.
+
+  CALL FUNCTION 'GUI_DOWNLOAD'
+    EXPORTING filename     = lv_file
+              filetype     = 'BIN'
+              bin_filesize = lv_xlen
+    TABLES    data_tab     = lt_bin
+    EXCEPTIONS OTHERS      = 1.
+
+  IF sy-subrc <> 0.
+    MESSAGE |Nie udało się zapisać pliku: { lv_file }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  " 8) Otwórz w przeglądarce
+  cl_gui_frontend_services=>execute(
+    EXPORTING document  = lv_file
+              operation = 'OPEN'
+    EXCEPTIONS OTHERS   = 1 ).
+
+  IF sy-subrc = 0.
+    MESSAGE |Podgląd v2 zapisany i otwarty: { lv_file }| TYPE 'S'.
+  ELSE.
+    MESSAGE |Zapisano: { lv_file }, ale nie udało się otworzyć.| TYPE 'I'.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Budowa HTML v2 - z kolumnami: Materiał, Nazwa, Nr zlecenia
+*---------------------------------------------------------------------*
+FORM build_html_from_agg_v2 USING    it_tab  TYPE ty_t_agg
+                            CHANGING ev_html TYPE string.
+
+  " 0) Sort
+  DATA lt TYPE ty_t_agg.
+  lt = it_tab.
+  SORT lt BY data_d ASCENDING
+             zmiana ASCENDING
+             linia_sort ASCENDING
+             linia_base ASCENDING          " <-- ZMIENIONE z sort_total
+             sort_total ASCENDING          " <-- ZMIENIONE z nazwa_stan
+             nazwa_stan ASCENDING.         " <-- ZMIENIONE z linia_plik
+
+  " 1) Stałe kolorów (identyczne jak w v1)
+  CONSTANTS: c_col_hdr  TYPE string VALUE '#f5f5f5',
+             c_sum_linia_bg TYPE string VALUE '#d7ebff',  " Σ LINIA (jasny niebieski)     ← ZMIENIONE
+             c_sum_zmiana_bg TYPE string VALUE '#fff9c4', " Σ ZMIANY (żółty)               ← NOWE
+             c_sum_dzien_bg  TYPE string VALUE '#0b4a7a', " Σ DZIEŃ (granat)               ← ZMIENIONE
+             c_sum2_fc  TYPE string VALUE '#ffffff',
+             c_poor     TYPE string VALUE '#b71c1c',
+             c_mid      TYPE string VALUE '#fff3cd',
+             c_good     TYPE string VALUE '#d4edda',
+             c_gray     TYPE string VALUE '#eeeeee',
+             c_border_black TYPE string VALUE '#000000',
+             c_cpracy_normal TYPE string VALUE '#d4edda',
+             c_cpracy_other  TYPE string VALUE '#ffe0b2'.
+
+  " 2) Nagłówek HTML
+  DATA html TYPE string.
+  html &&= |<table style='border-collapse:collapse; width:100%;'>|.
+  html &&= |<thead><tr>|.
+
+  " --- KLUCZ ---
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Data</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Zmiana</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Linia (plik)</th>|.
+
+
+  " --- NOWE KOLUMNY v2 ---
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Nr zlecenia</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Materiał</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Nazwa materiału</th>|.
+
+  " --- METRYKI ---
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Ilość</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Il. oczek.</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Śr. osób</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Nor. osób</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Wydajność %</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Czas trwania (min)</th>|.
+    html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr }; white-space:nowrap;' align='left'>Awaria - szczegółowy opis zdarzenia</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>Czas awarii (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzej (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzezbr (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>CPrzerwy (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };' align='right'>COrg (min)</th>|.
+  html &&= |<th style='border:1px solid #ddd; padding:4px; background:{ c_col_hdr };'>Stanowisko</th>|.
+
+  html &&= |</tr></thead><tbody>|.
+
+
+
+
+  " 3) Wiersze
+  FIELD-SYMBOLS <r> TYPE ty_agg.
+  LOOP AT lt ASSIGNING <r>.
+
+    " Bazowe style
+    DATA cell_l TYPE string.
+    DATA cell_r TYPE string.
+    DATA cell_wrap TYPE string.
+
+    cell_l = |border:1px solid #ddd; padding:4px; white-space:nowrap;|.
+    cell_r = cell_l && | text-align:right;|.
+    cell_wrap = |border:1px solid #ddd; padding:4px; white-space:normal; | &&
+                |overflow-wrap:anywhere; word-break:break-word; vertical-align:top;| &&
+                |font-size:10px;|.
+
+    DATA td_l TYPE string VALUE ''.
+    DATA td_r TYPE string VALUE ''.
+    DATA td_w TYPE string VALUE ''.
+    DATA td_wrap TYPE string VALUE ''.
+    DATA cpracy_style TYPE string VALUE ''.
+
+    IF <r>-is_total = abap_true.
+      " ===== SUMY =====
+      DATA bg        TYPE string.
+      DATA font_row  TYPE string.
+      DATA font_w    TYPE string.
+      DATA perf_sum  TYPE string.
+      DATA p_sum     TYPE decfloat34.
+      DATA borders   TYPE string VALUE ''.
+
+      IF <r>-total_lvl = 3.                                              " Σ LINIA
+        CONCATENATE 'background:' c_sum_linia_bg ';' INTO bg.
+        font_row = 'font-weight:700;'.
+        DATA btop3 TYPE string.
+        DATA bbot3 TYPE string.
+        btop3 = |border-top:1px solid { c_border_black };|.
+        bbot3 = |border-bottom:1px solid { c_border_black };|.
+        CONCATENATE btop3 bbot3 INTO borders.
+      ELSEIF <r>-total_lvl = 2.                                          " Σ ZMIANY
+        CONCATENATE 'background:' c_sum_zmiana_bg ';' INTO bg.
+        font_row = 'font-weight:700;'.
+        DATA btop2 TYPE string.
+        DATA bbot2 TYPE string.
+        btop2 = |border-top:2px solid { c_border_black };|.
+        bbot2 = |border-bottom:2px solid { c_border_black };|.
+        CONCATENATE btop2 bbot2 INTO borders.
+      ELSEIF <r>-total_lvl = 1.                                          " Σ DZIEŃ
+        CONCATENATE 'background:' c_sum_dzien_bg ';' INTO bg.
+        CONCATENATE 'color:' c_sum2_fc ';font-weight:700;' INTO font_row.
+        borders = 'border-top:2px solid #0b4a7a; border-bottom:2px solid #0b4a7a;'.
+      ENDIF.
+
+      td_l    = cell_l    && ' ' && bg && font_row && ' ' && borders.
+      td_r    = cell_r    && ' ' && bg && font_row && ' ' && borders.
+      td_wrap = cell_wrap && ' ' && bg && font_row && ' ' && borders.
+
+      DATA fc TYPE string.
+      IF <r>-plan_sum = 0.
+        perf_sum = 'background:' && c_gray && ';'.
+        fc = 'color:#000000;'.
+      ELSE.
+        p_sum = <r>-wyd_wazona.
+        IF p_sum < 85.
+          perf_sum = 'background:' && c_poor && ';'.
+          fc = 'color:#ffffff;'.
+        ELSEIF p_sum < 95.
+          perf_sum = 'background:' && c_mid && ';'.
+          fc = 'color:#000000;'.
+        ELSE.
+          perf_sum = 'background:' && c_good && ';'.
+          fc = 'color:#000000;'.
+        ENDIF.
+      ENDIF.
+
+      font_w = 'font-weight:700; ' && fc.
+      td_w   = cell_r && ' ' && perf_sum && font_w && ' ' && borders.
+
+      " Czy używać tagu <b>?
+      DATA use_bold_tag TYPE abap_bool.
+      IF <r>-total_lvl = 2 OR <r>-total_lvl = 3.
+        use_bold_tag = abap_true.
+      ELSE.
+        use_bold_tag = abap_false.
+      ENDIF.
+
+      " ========== RENDEROWANIE SUM ==========
+      IF use_bold_tag = abap_true.
+        html = html && '<tr>' &&
+               |<td style="{ td_l }"><b>{ <r>-data_d }</b></td>| &&
+               |<td style="{ td_l }"><b>{ <r>-zmiana }</b></td>| &&
+               |<td style="{ td_l }"><b>{ <r>-linia_plik }</b></td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-qty_sum  NUMBER = USER DECIMALS = 0 }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-plan_sum NUMBER = USER DECIMALS = 0 }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-osoby_rzecz_avg }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-osoby_norm_avg }</b></td>| &&
+               |<td style="{ td_w }"><b>{ <r>-wyd_waz_disp }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_trwania_sum  NUMBER = USER DECIMALS = 0 }</b></td>| &&
+               |<td style="{ td_wrap }"></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_awarie_sum  NUMBER = USER DECIMALS = 0 }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_przej_sum }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_przezbr_sum }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_przerwy_sum }</b></td>| &&
+               |<td style="{ td_r }"><b>{ <r>-c_org_sum }</b></td>| &&
+               |<td style="{ td_l }"><b>{ <r>-nazwa_stan }</b></td>| &&
+               |</tr>|.
+      ELSE.
+        html = html && '<tr>' &&
+               |<td style="{ td_l }">{ <r>-data_d }</td>| &&
+               |<td style="{ td_l }">{ <r>-zmiana }</td>| &&
+               |<td style="{ td_l }">{ <r>-linia_plik }</td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_l }"></td>| &&
+               |<td style="{ td_r }">{ <r>-qty_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+               |<td style="{ td_r }">{ <r>-plan_sum NUMBER = USER DECIMALS = 0 }</td>| &&
+               |<td style="{ td_r }">{ <r>-osoby_rzecz_avg }</td>| &&
+               |<td style="{ td_r }">{ <r>-osoby_norm_avg }</td>| &&
+               |<td style="{ td_w }">{ <r>-wyd_waz_disp }</td>| &&
+               |<td style="{ td_r }">{ <r>-c_trwania_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+               |<td style="{ td_wrap }"></td>| &&
+               |<td style="{ td_r }">{ <r>-c_awarie_sum  NUMBER = USER DECIMALS = 0 }</td>| &&
+               |<td style="{ td_r }">{ <r>-c_przej_sum }</td>| &&
+               |<td style="{ td_r }">{ <r>-c_przezbr_sum }</td>| &&
+               |<td style="{ td_r }">{ <r>-c_przerwy_sum }</td>| &&
+               |<td style="{ td_r }">{ <r>-c_org_sum }</td>| &&
+               |<td style="{ td_l }">{ <r>-nazwa_stan }</td>| &&
+               |</tr>|.
+      ENDIF.
+      " ========== KONIEC RENDEROWANIA SUM ==========
+
+    ELSE.
+      " ===== DETALE ===== ← DODAJ TEN ELSE!
+      td_l = cell_l.
+      td_r = cell_r.
+      td_wrap = cell_wrap.
+
+      DATA perf TYPE string.
+      DATA p    TYPE decfloat34.
+      CLEAR perf.
+      IF <r>-plan_sum = 0.
+        perf = 'background:' && c_gray && '; font-weight:700;'.
+      ELSE.
+        p = <r>-wyd_wazona.
+        IF p < 85.
+          perf = 'background:' && c_poor && '; color:#ffffff; font-weight:700;'.
+        ELSEIF p < 95.
+          perf = 'background:' && c_mid  && '; font-weight:700;'.
+        ELSE.
+          perf = 'background:' && c_good && '; font-weight:700;'.
+        ENDIF.
+      ENDIF.
+      td_w = cell_r && ' ' && perf.
+
+      IF <r>-c_trwania_sum = 480.
+        cpracy_style = |background:{ c_cpracy_normal }; font-weight:700;|.
+      ELSE.
+        cpracy_style = |background:{ c_cpracy_other }; font-weight:700;|.
+      ENDIF.
+
+      DATA s_qty  TYPE string.
+      DATA s_plan TYPE string.
+      s_qty  = |{ <r>-qty_sum  NUMBER = USER DECIMALS = 0 }|.
+      s_plan = |{ <r>-plan_sum NUMBER = USER DECIMALS = 0 }|.
+
+      DATA desc TYPE string.
+      desc = <r>-awarie_txt_sum.
+      PERFORM html_escape USING desc CHANGING desc.
+
+      DATA s_matnr TYPE string.
+      DATA s_maktx TYPE string.
+      DATA s_aufnr TYPE string.
+
+      s_matnr = <r>-matnr.
+      s_maktx = <r>-maktx.
+      s_aufnr = <r>-nr_zlecenia.
+
+      CALL FUNCTION 'CONVERSION_EXIT_MATN1_OUTPUT'
+        EXPORTING input  = s_matnr
+        IMPORTING output = s_matnr
+        EXCEPTIONS OTHERS = 1.
+
+      " Render DETAL
+      html = html && '<tr>' &&
+             |<td style="{ td_l }">{ <r>-data_d }</td>| &&
+             |<td style="{ td_l }">{ <r>-zmiana }</td>| &&
+             |<td style="{ td_l }">{ <r>-linia_plik }</td>| &&
+             |<td style="{ td_l }">{ s_aufnr }</td>| &&
+             |<td style="{ td_l }">{ s_matnr }</td>| &&
+             |<td style="{ td_l }">{ s_maktx }</td>| &&
+             |<td style="{ td_r }">{ s_qty }</td>| &&
+             |<td style="{ td_r }">{ s_plan }</td>| &&
+             |<td style="{ td_r }">{ <r>-osoby_rzecz_avg }</td>| &&
+             |<td style="{ td_r }">{ <r>-osoby_norm_avg }</td>| &&
+             |<td style="{ td_w }">{ <r>-wyd_waz_disp }</td>| &&
+             |<td style="{ td_r } { cpracy_style }">{ <r>-c_trwania_sum }</td>| &&
+             |<td style="{ td_wrap }">{ desc }</td>| &&
+             |<td style="{ td_r }">{ <r>-c_awarie_sum }</td>| &&
+             |<td style="{ td_r }">{ <r>-c_przej_sum }</td>| &&
+             |<td style="{ td_r }">{ <r>-c_przezbr_sum }</td>| &&
+             |<td style="{ td_r }">{ <r>-c_przerwy_sum }</td>| &&
+             |<td style="{ td_r }">{ <r>-c_org_sum }</td>| &&
+             |<td style="{ td_l }">{ <r>-nazwa_stan }</td>| &&
+             |</tr>|.
+
+    ENDIF.  " ← DODAJ TEN ENDIF!
+
+  ENDLOOP.
+
+  " 4) Zakończenie
+  ev_html = html && '</tbody></table>'.
+
+ENDFORM.
